@@ -82,12 +82,15 @@ inline uint16_t noteToFnum(int noteNum, int& blockOut)
 // =============================================================================
 // SSG トーンピリオド計算
 // YM2608 SSG: freq = master_clock / (64 * TP)
-//   → TP = 8,000,000 / (64 * freq) = 125,000 / freq
+//   → TP = chip_clock / (64 * freq)
+// chipClock: YM2608マスタークロック（7987200=NTSC, 8000000=ymfm標準）
+// Issue #22: クロック定数をハードコードせず引数で受け取る
 // =============================================================================
-inline uint16_t noteToSSGPeriod(int noteNum)
+inline uint16_t noteToSSGPeriod(int noteNum, uint32_t chipClock = 7987200)
 {
     double freq = 440.0 * std::pow(2.0, (noteNum - 69) / 12.0);
-    uint16_t tp = (uint16_t)std::round(125000.0 / freq);
+    double divisor = chipClock / 64.0;
+    uint16_t tp = (uint16_t)std::round(divisor / freq);
     return std::clamp(tp, (uint16_t)1, (uint16_t)4095);
 }
 

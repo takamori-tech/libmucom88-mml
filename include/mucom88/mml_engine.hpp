@@ -52,7 +52,7 @@ public:
     // SSG 3チャンネル (D-F=3-5)
     static constexpr int MAX_SSG_CHANNELS = 3;
 
-    MmlEngine() : m_engine(nullptr), m_sampleRate(44100), m_playing(false) {}
+    MmlEngine() : m_engine(nullptr), m_sampleRate(44100), m_chipClock(7987200), m_playing(false) {}
 
     // ── チャンネル種別判定 ────────────────────────────────
     static bool isFM(int ch)     { return ch <= 2 || (ch >= 7 && ch <= 9); }
@@ -65,10 +65,11 @@ public:
     static int toSSGIndex(int ch) { return ch - 3; }
 
     // ── 初期化 ─────────────────────────────────────────
-    void init(IFmEngine* engine, uint32_t sampleRate)
+    void init(IFmEngine* engine, uint32_t sampleRate, uint32_t chipClock = 7987200)
     {
         m_engine     = engine;
         m_sampleRate = sampleRate;
+        m_chipClock  = chipClock;
         for (auto& ch : m_channels) ch = ChannelState{};
         m_patchMap.clear();
         m_fmPatchNo.fill(0);
@@ -456,18 +457,43 @@ public:
                 }
             }
 
-            // ランタイム状態リセット
+            // ランタイム状態リセット（全可変状態をデフォルト値に復元）
+            // Issue #19: ループ2周目以降のSSGピッチずれ修正
             st.currentNote  = 0;
             st.reverbActive = false;
             st.portaActive  = false;
+            // ピッチ関連
+            st.detune       = 0;
             st.lfoPitchOffset = 0;
             st.lfoDelayCounter = 0;
             st.lfoStepCounter  = 0;
             st.lfoRateCounter  = 0;
             st.lfoDirection    = 1;
-            st.ssgReleasing = false;
+            st.lfoEnabled   = false;
+            st.lfoDelay     = 0;
+            st.lfoRate      = 1;
+            st.lfoDepth     = 0;
+            st.lfoCount     = 0;
+            // 音量・パン・スタッカート
+            st.volume       = 12;
+            st.pan          = 3;
+            st.staccato     = 0;
+            // SSGエンベロープ
+            st.ssgSoftEnv   = false;
+            st.ssgEnvMode   = false;
+            st.ssgEnvAL = st.ssgEnvAR = st.ssgEnvDR = 0;
+            st.ssgEnvSL = st.ssgEnvSR = st.ssgEnvRR = 0;
             st.ssgEnvPhase  = 0;
             st.ssgEnvValue  = 0;
+            st.ssgReleasing = false;
+            st.ssgRelVol    = 0;
+            // リバーブ
+            st.reverbValue    = 0;
+            st.reverbEnabled  = false;
+            st.reverbQCutOnly = false;
+
+            // SSGミキサーリセット（トーン有効、ノイズ無効）
+            m_ssgMixer = 0x38;
 
             // ループ再開位置までのイベントを走査して状態復元
             for (size_t i = 0; i < st.eventIdx; i++) {
@@ -487,6 +513,32 @@ public:
                     st.lfoDelay = ev.vibDelay; st.lfoRate = ev.vibRate;
                     st.lfoDepth = ev.vibDepth; st.lfoCount = ev.vibCount;
                     break;
+                case MmlEventType::VIBRATO_SWITCH:
+                    st.lfoEnabled = (ev.value != 0);
+                    break;
+                case MmlEventType::LFO_PARAM:
+                    switch (ev.vibDelay) {
+                        case 0: st.lfoDelay = ev.value; break;
+                        case 1: st.lfoRate  = std::max(ev.value, 1); break;
+                        case 2: st.lfoDepth = ev.value; break;
+                        case 3: st.lfoCount = std::max(ev.value, 1); break;
+                    }
+                    break;
+                case MmlEventType::REG_WRITE: {
+                    int addr = ev.note;
+                    int data = ev.value;
+                    // SSGミキサー仮想アドレス（0xF0-0xF2）の復元
+                    if (addr >= 0xF0 && addr <= 0xF2) {
+                        int si = addr - 0xF0;
+                        bool toneOn  = (data & 1) != 0;
+                        bool noiseOn = (data & 2) != 0;
+                        if (toneOn)  m_ssgMixer &= ~(1 << si);
+                        else         m_ssgMixer |=  (1 << si);
+                        if (noiseOn) m_ssgMixer &= ~(1 << (si+3));
+                        else         m_ssgMixer |=  (1 << (si+3));
+                    }
+                    break;
+                }
                 case MmlEventType::REVERB_ENVELOPE:
                     st.reverbValue = ev.value; st.reverbEnabled = true; break;
                 case MmlEventType::REVERB_SWITCH:
@@ -504,10 +556,16 @@ public:
             }
         }
 
-        // Timer-B再計算 + 音色/PAN復元
+        // Timer-B再計算 + 音色/PAN/音量復元
         recalcTimerB();
         for (int fi = 0; fi < MAX_FM_CHANNELS; fi++)
             fmApplyPatch(fi, m_fmPatchNo[fi]);
+        // フェードアウト中のループ再開でキャリアTLが未減衰にならないよう
+        // m_globalAtt を反映した音量を即時適用（Issue #19）
+        for (int fi = 0; fi < MAX_FM_CHANNELS; fi++) {
+            int ch = fmMmlCh(fi);
+            fmSetVolume(fi, m_channels[ch].volume);
+        }
         for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
             if (isFM(ch)) {
                 int fi = toFMIndex(ch);
@@ -578,6 +636,7 @@ private:
 
     IFmEngine*  m_engine;
     uint32_t    m_sampleRate;
+    uint32_t    m_chipClock;  // YM2608マスタークロック（Issue #22）
     bool        m_playing = false;
     bool        m_loop    = true;
     // グローバル同期クロック（MUCOM88 INT3割り込み相当）
@@ -1252,7 +1311,7 @@ private:
     void ssgWriteFreq(int si, int noteNum, int pitchOffset)
     {
         if (!m_engine) return;
-        uint16_t tp = noteToSSGPeriod(noteNum);
+        uint16_t tp = noteToSSGPeriod(noteNum, m_chipClock);
         // SSG: ピリオド値にオフセット（符号反転: F-Number増=周波数上昇=ピリオド減少）
         int adjusted = (int)tp - pitchOffset;
         tp = (uint16_t)std::clamp(adjusted, 1, 0xFFF);
