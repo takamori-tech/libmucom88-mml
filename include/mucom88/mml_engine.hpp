@@ -113,11 +113,15 @@ public:
         m_globalSampleAccum = 0;
         m_audioLeftMs       = 0.0;
         m_globalTempo       = 120;
-        // 最初のTEMPOイベントを探して初期テンポを設定
+        // 最初のTEMPOイベントを探して初期テンポを設定 + パート独立ループ初期化
         for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
-            m_channels[ch].eventIdx = 0;
-            m_channels[ch].noteOn   = false;
-            for (const auto& ev : m_channels[ch].events) {
+            auto& st = m_channels[ch];
+            st.eventIdx   = 0;
+            st.noteOn     = false;
+            st.tickOffset = 0;
+            // endTick: 最終イベントのtick（ループ周期計算用）
+            st.endTick = st.events.empty() ? 0 : st.events.back().tick;
+            for (const auto& ev : st.events) {
                 if (ev.type == MmlEventType::TEMPO) {
                     m_globalTempo = ev.value;
                     break;
@@ -286,7 +290,17 @@ public:
                 for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                     auto& st = m_channels[ch];
                     if (st.events.empty()) continue;
-                    if (st.eventIdx >= st.events.size()) continue;
+                    // パート独立ループ（Z80互換）: チャンネルがイベント末尾に
+                    // 到達したら、そのチャンネルだけをLポイントに巻き戻す。
+                    // Z80ドライバーは各チャンネルが独立にENDを検出しループする。
+                    if (st.eventIdx >= st.events.size()) {
+                        if (m_loop && st.hasLoopPoint) {
+                            channelLoopRestart(ch);
+                            // 巻き戻し直後のイベントを即座に処理
+                            processEvents(ch, m_globalTick);
+                        }
+                        continue;
+                    }
                     processEvents(ch, m_globalTick);
                     if (st.noteOn && st.lfoEnabled && st.lfoDepth != 0)
                         tickLfo(ch);
@@ -336,154 +350,99 @@ public:
             }
         }
 
-        // 全チャンネル終端 → ループまたは停止
+        // 全チャンネル終端 → 停止判定
+        // パート独立ループ: ループポイントを持つチャンネルは advance() 内で
+        // 自動巻き戻し済み。ループポイントのないチャンネルのみが停止判定対象。
         bool allDone = true;
         for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
             if (m_channels[ch].events.empty()) continue;
+            if (m_channels[ch].hasLoopPoint) continue;  // 独立ループ中
             if (m_channels[ch].eventIdx < m_channels[ch].events.size()) {
                 allDone = false;
                 break;
             }
         }
-        if (allDone) {
-            if (m_loop) {
-                // ループポイント（Lコマンド）があれば、そのtick/eventIdxから再開
-                // なければ先頭（tick=0, eventIdx=0）から再開
-                uint32_t loopTick = 0;
-                bool anyLoopPoint = false;
-                for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
-                    if (m_channels[ch].hasLoopPoint) {
-                        anyLoopPoint = true;
-                        if (m_channels[ch].loopTick > loopTick)
-                            loopTick = m_channels[ch].loopTick;
-                        break;
-                    }
-                }
+        if (allDone && !m_loop) {
+            stop();
+        }
+    }
 
-                m_globalTick        = loopTick;
-                m_globalSampleAccum = 0;
-                m_audioLeftMs       = 0.0;  // Timer-B残余ミリ秒リセット
-                m_globalTempo       = 120;
+    // ── パート独立ループ: 1チャンネルをループポイントに巻き戻す ──
+    // Z80互換: 各チャンネルがデータ終端(0x00)に到達すると、
+    // そのチャンネル単独でLコマンド位置（IX+4/5）にジャンプする。
+    // 他チャンネルのテンポやTimer-Bには触れない。
+    void channelLoopRestart(int ch)
+    {
+        auto& st = m_channels[ch];
+        // KEY_OFF
+        if (st.noteOn) {
+            if      (isFM(ch))  fmKeyOff(toFMIndex(ch));
+            else if (isSSG(ch)) ssgKeyOff(toSSGIndex(ch));
+            st.noteOn = false;
+        }
+        // tickオフセット更新: globalTickがloopTickに対応するように
+        // ループ周期 = endTick - loopTick（このチャンネルのループ1回分のtick数）
+        // 巻き戻し時: tickOffset += ループ周期
+        uint32_t loopLen = st.endTick - st.loopTick;
+        if (loopLen == 0) loopLen = 1;  // ゼロ除算防止
+        st.tickOffset += loopLen;
+        // eventIdxをループポイントに設定
+        st.eventIdx = st.loopEventIdx;
+        // ランタイム状態リセット（音色/音量/パン等の永続設定は保持）
+        st.currentNote  = 0;
+        st.reverbActive = false;
+        st.portaActive  = false;
+        st.lfoPitchOffset = 0;
+        st.lfoDelayCounter = 0;
+        st.lfoStepCounter  = 0;
+        st.lfoRateCounter  = 0;
+        st.lfoDirection    = 1;
+        st.ssgReleasing = false;
+        st.ssgEnvPhase  = 0;
+        st.ssgEnvValue  = 0;
 
-                // 全チャンネル KEY_OFF
-                for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
-                    if (m_channels[ch].noteOn) {
-                        if      (isFM(ch))  fmKeyOff(toFMIndex(ch));
-                        else if (isSSG(ch)) ssgKeyOff(toSSGIndex(ch));
-                    }
-                }
-
-                for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
-                    auto& st = m_channels[ch];
-
-                    // eventIdx をループ再開位置に設定
-                    if (st.hasLoopPoint) {
-                        st.eventIdx = st.loopEventIdx;
-                    } else {
-                        st.eventIdx = 0;
-                        if (anyLoopPoint) {
-                            for (size_t i = 0; i < st.events.size(); i++) {
-                                if (st.events[i].tick >= loopTick) {
-                                    st.eventIdx = i;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    // チャンネル状態を初期値にリセット
-                    st.noteOn       = false;
-                    st.currentNote  = 0;
-                    st.reverbActive = false;
-                    st.reverbEnabled = false;
-                    st.reverbValue  = 0;
-                    st.reverbQCutOnly = false;
-                    st.portaActive  = false;
-                    st.lfoPitchOffset = 0;
-                    st.lfoDelayCounter = 0;
-                    st.lfoStepCounter  = 0;
-                    st.lfoRateCounter  = 0;
-                    st.lfoDirection    = 1;
-                    st.ssgReleasing = false;
-                    st.ssgEnvPhase  = 0;
-                    st.ssgEnvValue  = 0;
-
-                    // ループ再開位置までのイベントを走査して状態を復元
-                    for (size_t i = 0; i < st.eventIdx; i++) {
-                        const auto& ev = st.events[i];
-                        switch (ev.type) {
-                        case MmlEventType::TEMPO:
-                            m_globalTempo = ev.value;
-                            break;
-                        case MmlEventType::VOLUME:
-                            st.volume = ev.value;
-                            break;
-                        case MmlEventType::PATCH:
-                            if (isFM(ch)) {
-                                m_fmPatchNo[toFMIndex(ch)] = ev.value;
-                            } else if (isSSG(ch)) {
-                                ssgApplyPreset(toSSGIndex(ch), ev.value);
-                            }
-                            break;
-                        case MmlEventType::PAN:
-                            st.pan = ev.value;
-                            break;
-                        case MmlEventType::STACCATO:
-                            st.staccato = ev.value;
-                            break;
-                        case MmlEventType::DETUNE:
-                            st.detune = ev.value;
-                            break;
-                        case MmlEventType::VIBRATO:
-                            st.lfoEnabled = true;
-                            st.lfoDelay = ev.vibDelay;
-                            st.lfoRate  = ev.vibRate;
-                            st.lfoDepth = ev.vibDepth;
-                            st.lfoCount = ev.vibCount;
-                            break;
-                        case MmlEventType::REVERB_ENVELOPE:
-                            st.reverbValue = ev.value;
-                            st.reverbEnabled = true;
-                            break;
-                        case MmlEventType::REVERB_SWITCH:
-                            st.reverbEnabled = (ev.value != 0);
-                            break;
-                        case MmlEventType::REVERB_MODE:
-                            st.reverbQCutOnly = (ev.value != 0);
-                            break;
-                        case MmlEventType::SSG_ENVELOPE:
-                            st.ssgSoftEnv = true;
-                            st.ssgEnvAL = ev.envAL;
-                            st.ssgEnvAR = ev.envAR;
-                            st.ssgEnvDR = ev.envDR;
-                            st.ssgEnvSL = ev.envSL;
-                            st.ssgEnvSR = ev.envSR;
-                            st.ssgEnvRR = ev.envRR;
-                            break;
-                        default:
-                            break;
-                        }
-                    }
-                }
-                // Timer-B再計算 + 音色/PAN復元
-                recalcTimerB();
-                m_timerBCount = m_timerBPeriod;  // カウンタをフル周期にリセット
-                for (int fi = 0; fi < MAX_FM_CHANNELS; fi++)
-                    fmApplyPatch(fi, m_fmPatchNo[fi]);
-                for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
-                    if (isFM(ch)) {
-                        int fi = toFMIndex(ch);
-                        int port = fmPort(fi);
-                        int off  = fmOffset(fi);
-                        m_engine->writeReg(port, 0xB4 + off,
-                            (uint8_t)(panToReg(m_channels[ch].pan)));
-                    }
-                }
-                // SSGミキサー復元
-                m_engine->writeReg(0, 0x07, m_ssgMixer);
-            } else {
-                stop();
+        // ループ再開位置までのイベントを走査して状態復元
+        // ※ テンポ(TEMPO)は復元しない — Z80ドライバーではテンポはグローバル
+        //   レジスタに書かれ、チャンネルループで巻き戻されない。
+        //   先にループしたチャンネルがテンポを上書きすると他チャンネルの
+        //   再生速度が変わってしまうため、ここでは触れない。
+        for (size_t i = 0; i < st.eventIdx; i++) {
+            const auto& ev = st.events[i];
+            switch (ev.type) {
+            case MmlEventType::VOLUME:   st.volume = ev.value; break;
+            case MmlEventType::PATCH:
+                if (isFM(ch))  m_fmPatchNo[toFMIndex(ch)] = ev.value;
+                if (isSSG(ch)) ssgApplyPreset(toSSGIndex(ch), ev.value);
+                break;
+            case MmlEventType::PAN:       st.pan = ev.value; break;
+            case MmlEventType::STACCATO:  st.staccato = ev.value; break;
+            case MmlEventType::DETUNE:    st.detune = ev.value; break;
+            case MmlEventType::VIBRATO:
+                st.lfoEnabled = true;
+                st.lfoDelay = ev.vibDelay; st.lfoRate = ev.vibRate;
+                st.lfoDepth = ev.vibDepth; st.lfoCount = ev.vibCount;
+                break;
+            case MmlEventType::REVERB_ENVELOPE:
+                st.reverbValue = ev.value; st.reverbEnabled = true; break;
+            case MmlEventType::REVERB_SWITCH:
+                st.reverbEnabled = (ev.value != 0); break;
+            case MmlEventType::REVERB_MODE:
+                st.reverbQCutOnly = (ev.value != 0); break;
+            case MmlEventType::SSG_ENVELOPE:
+                st.ssgSoftEnv = true;
+                st.ssgEnvAL = ev.envAL; st.ssgEnvAR = ev.envAR;
+                st.ssgEnvDR = ev.envDR; st.ssgEnvSL = ev.envSL;
+                st.ssgEnvSR = ev.envSR; st.ssgEnvRR = ev.envRR;
+                break;
+            default: break;
             }
+        }
+        // 音色をチップに再適用
+        if (isFM(ch)) {
+            int fi = toFMIndex(ch);
+            fmApplyPatch(fi, m_fmPatchNo[fi]);
+            int port = fmPort(fi), off = fmOffset(fi);
+            m_engine->writeReg(port, 0xB4 + off, (uint8_t)panToReg(st.pan));
         }
     }
 
@@ -541,6 +500,11 @@ private:
         size_t   loopEventIdx   = 0;   // ループ再開時のイベントインデックス
         uint32_t loopTick       = 0;   // ループ再開時のtick
         bool     hasLoopPoint   = false;
+        // パート独立ループ用tickオフセット
+        // ループ巻き戻し時に、グローバルtickとイベントtickの差分を吸収する。
+        // channelTick = globalTick - tickOffset でイベントtickと比較する。
+        uint32_t tickOffset     = 0;
+        uint32_t endTick        = 0;   // このチャンネルの最終イベントtick（ループ周期計算用）
     };
 
     IFmEngine*  m_engine;
@@ -590,9 +554,12 @@ private:
     void processEvents(int ch, uint32_t tick)
     {
         auto& st = m_channels[ch];
+        // パート独立ループ: globalTickからチャンネルのtickオフセットを引いて
+        // イベントの絶対tickと比較する（ループ巻き戻し後も正しく動作）
+        uint32_t chTick = tick - st.tickOffset;
         while (st.eventIdx < st.events.size()) {
             const MmlEvent& ev = st.events[st.eventIdx];
-            if (ev.tick > tick) break;
+            if (ev.tick > chTick) break;
 
             switch (ev.type) {
             case MmlEventType::NOTE_ON:
