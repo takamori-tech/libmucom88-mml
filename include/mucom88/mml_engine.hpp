@@ -199,6 +199,14 @@ public:
     uint32_t globalTick() const { return m_globalTick; }
     int globalTempo() const { return m_globalTempo; }
 
+    // チャンネル状態取得（UI表示用）
+    bool chNoteOn(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].noteOn : false; }
+    int  chNote(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].currentNote : 0; }
+    int  chVolume(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].volume : 0; }
+    int  chPan(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].pan : 3; }
+    // FM パッチ番号取得（fi=FMインデックス 0-5）
+    int  fmPatchNo(int fi) const { return (fi >= 0 && fi < MAX_FM_CHANNELS) ? m_fmPatchNo[fi] : -1; }
+
     // ── グローバル減衰（ダッキング用）────────────────────
     // att: FM TL加算値（0=通常、20≈-15dB）。SSGはatt/4で換算。
     // ADPCM-A/Bには影響しない（レジスタが別系統のため）。
@@ -353,6 +361,15 @@ public:
                 m_globalSampleAccum = 0;
                 m_globalTempo       = 120;
 
+                // 全チャンネル KEY_OFF（allSoundOffではなく穏やかな停止）
+                for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
+                    if (m_channels[ch].noteOn) {
+                        if      (isFM(ch))  fmKeyOff(toFMIndex(ch));
+                        else if (isSSG(ch)) ssgKeyOff(toSSGIndex(ch));
+                        m_channels[ch].noteOn = false;
+                    }
+                }
+
                 for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                     auto& st = m_channels[ch];
                     if (st.hasLoopPoint) {
@@ -370,15 +387,58 @@ public:
                     }
                     st.noteOn = false;
 
-                    // ループ再開位置までに出現するTEMPOイベントの最後の値を取得
+                    // ループ再開位置までのイベントを走査して状態を復元
+                    // （PATCH/VOLUME/PAN/STACCATO/TEMPO/DETUNE/LFO等）
                     for (size_t i = 0; i < st.eventIdx; i++) {
-                        if (st.events[i].type == MmlEventType::TEMPO)
-                            m_globalTempo = st.events[i].value;
+                        const auto& ev = st.events[i];
+                        switch (ev.type) {
+                        case MmlEventType::TEMPO:
+                            m_globalTempo = ev.value;
+                            break;
+                        case MmlEventType::VOLUME:
+                            st.volume = ev.value;
+                            break;
+                        case MmlEventType::PATCH:
+                            if (isFM(ch)) {
+                                int fi = toFMIndex(ch);
+                                m_fmPatchNo[fi] = ev.value;
+                            }
+                            break;
+                        case MmlEventType::PAN:
+                            st.pan = ev.value;
+                            break;
+                        case MmlEventType::STACCATO:
+                            st.staccato = ev.value;
+                            break;
+                        case MmlEventType::DETUNE:
+                            st.detune = ev.value;
+                            break;
+                        case MmlEventType::VIBRATO:
+                            st.lfoEnabled = true;
+                            st.lfoDelay = ev.vibDelay;
+                            st.lfoRate  = ev.vibRate;
+                            st.lfoDepth = ev.vibDepth;
+                            st.lfoCount = ev.vibCount;
+                            break;
+                        default:
+                            break;
+                        }
                     }
                 }
-                allSoundOff();
+                // 復元した音色をチップに適用（KEY_ONなしで音色レジスタのみ）
+                recalcTimerB();
                 for (int fi = 0; fi < MAX_FM_CHANNELS; fi++)
                     fmApplyPatch(fi, m_fmPatchNo[fi]);
+                // FM PAN復元
+                for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
+                    if (isFM(ch)) {
+                        int fi = toFMIndex(ch);
+                        int port = fmPort(fi);
+                        int off  = fmOffset(fi);
+                        m_engine->writeReg(port, 0xB4 + off,
+                            (uint8_t)(panToReg(m_channels[ch].pan) | 0x00));
+                    }
+                }
             } else {
                 stop();
             }

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cmath>
 #include <algorithm>
+#include <string>
 
 // =============================================================================
 // FmPatch: MUCOM88形式の音色定義
@@ -39,6 +40,8 @@ struct FmPatch {
     bool isOpm = false;   // true=OPM音色, false=OPN音色
     int  pms   = 0;       // Phase Modulation Sensitivity (0-7, OPM LFO)
     int  ams   = 0;       // Amplitude Modulation Sensitivity (0-3, OPM LFO)
+
+    std::string name;           // 音色名（voice.dat: 6文字、MUCインライン: ,"name"）
 
     bool valid = false;
 };
@@ -140,6 +143,15 @@ inline FmPatch parseVoiceDatEntry(const uint8_t* voiceDat, size_t dataSize, int 
     // 注: バイト25はFB/ALと共用。OPNモードではFB/AL、OPMモードではフラグ。
     // OPM判定は音色名領域（byte 26-31）のパターンで行う。
     // 現時点ではisOpm=falseのまま（将来のG2モード用に予約）。
+
+    // 音色名（byte 26-31, 6文字ASCII）
+    for (int j = 0; j < 6; j++) {
+        uint8_t c = rec[26 + j];
+        if (c >= 0x20 && c < 0x7F) p.name += (char)c;
+    }
+    // 末尾スペース除去
+    while (!p.name.empty() && p.name.back() == ' ')
+        p.name.pop_back();
 
     p.valid = true;
     return p;

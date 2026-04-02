@@ -481,7 +481,23 @@ private:
                 patch.op[oi].dt  = readInt(muc, p, 0);
             }
 
+            // 音色名パース: op4行末の ,"name" または ,\"name\"
             if (ok) {
+                // op4のDTの後にカンマ+"文字列"があれば音色名
+                while (p < muc.size() && (muc[p] == ' ' || muc[p] == '\t')) p++;
+                if (p < muc.size() && muc[p] == ',') {
+                    p++;
+                    while (p < muc.size() && (muc[p] == ' ' || muc[p] == '\t')) p++;
+                    if (p < muc.size() && muc[p] == '"') {
+                        p++; // skip opening "
+                        std::string name;
+                        while (p < muc.size() && muc[p] != '"' && muc[p] != '\n' && muc[p] != '\r') {
+                            name += muc[p++];
+                        }
+                        if (p < muc.size() && muc[p] == '"') p++;
+                        patch.name = name;
+                    }
+                }
                 patch.valid = true;
                 m_patches[patchNo] = patch;
             }
