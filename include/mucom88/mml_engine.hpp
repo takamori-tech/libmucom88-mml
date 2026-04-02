@@ -715,7 +715,8 @@ private:
         while (st.eventIdx < st.events.size()) {
             const MmlEvent& ev = st.events[st.eventIdx];
             // commonEndTickを超えるイベントはスキップ（非破壊打ち切り、libmucom88-mml#2）
-            if (m_commonEndTick > 0 && ev.tick >= m_commonEndTick) {
+            // 同一tickのイベントは処理する（libmucom88-mml#3: >= → >）
+            if (m_commonEndTick > 0 && ev.tick > m_commonEndTick) {
                 st.eventIdx = st.events.size();  // 残りイベントを全スキップ
                 break;
             }
