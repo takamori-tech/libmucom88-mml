@@ -103,6 +103,10 @@ public:
     // パーサーのwholeTick値を渡す。テンポ計算のPPQに影響。
     void setWholeTick(int wt) { m_wholeTick = (wt > 0) ? wt : 128; }
 
+    // 曲全体のループ終端tickを外部から設定（パート分離比較用）
+    // play()内のcommonEndTick計算を上書きする
+    void setCommonEndTick(uint32_t tick) { m_overrideEndTick = tick; }
+
     // ── ループ設定 ──────────────────────────────────────
     void setLoop(bool loop) { m_loop = loop; }
 
@@ -158,6 +162,21 @@ public:
             }
             if (anyLoop && minEnd != UINT32_MAX)
                 m_commonEndTick = minEnd;
+            // 外部からループ終端tickが指定されている場合はそちらを優先
+            // （パート分離比較時にOpenMUCOM88のMaxCountと合わせるため）
+            if (m_overrideEndTick > 0)
+                m_commonEndTick = m_overrideEndTick;
+
+            // Z80コンパイラ互換: 全チャンネルのイベントをcommonEndTickで打ち切り
+            // Z80コンパイラは全チャンネルをMaxCount(=commonEndTick)にパディングする。
+            // パーサーがcommonEndTickを超えるイベントを生成した場合、それらは無効。
+            if (m_commonEndTick > 0) {
+                for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
+                    auto& evs = m_channels[ch].events;
+                    while (!evs.empty() && evs.back().tick >= m_commonEndTick)
+                        evs.pop_back();
+                }
+            }
         }
         // Timer-B 初期化
         recalcTimerB();
@@ -351,9 +370,11 @@ public:
                     auto& cst = m_channels[ch];
                     int si = toSSGIndex(ch);
 
-                    if (cst.ssgSoftEnv) {
+                    if (cst.ssgSoftEnv && (cst.noteOn || cst.ssgEnvPhase > 0)) {
                         // ── MUCOM88 SOFENV互換 ADSRステートマシン ──
-                        // phase>0でtick更新、phase=0(終了)でも振幅0を書き込む
+                        // Z80 SSSUB0: BIT 7,(IX+6) → エンベロープ有効時のみSOFENV呼び出し
+                        // 発音中(noteOn)またはRELEASE中(phase>0)のみ処理。
+                        // 未発音時（休符等）はSOFENVを回さない（Z80と同じ）。
                         if (cst.ssgEnvPhase > 0)
                             ssgTickEnvelope(ch);
                         int vol = std::clamp(cst.volume - m_globalAtt / 4, 0, 15);
@@ -570,6 +591,7 @@ private:
     int         m_wholeTick         = 128;  // Cコマンド（デフォルトC128）
     // 曲全体ループ（OpenMUCOM88 maxcount 互換）
     uint32_t    m_commonEndTick     = 0;    // 全チャンネル共通のループ終端tick
+    uint32_t    m_overrideEndTick  = 0;    // 外部から指定されたループ終端tick（0=未指定）
     uint32_t    m_commonLoopTick    = 0;    // 全チャンネル共通のLコマンドtick
     uint32_t    m_loopTickOffset    = 0;    // ループ巻き戻しの累積tickオフセット
     std::array<ChannelState, MAX_MML_CHANNELS> m_channels;
@@ -1193,14 +1215,13 @@ private:
             { 0,  8,  4, 12},  // AL7: 全op
         };
 
-        // MUCOM88 FMVDAT テーブル
-        // OpenMUCOM88のTLレジスタキャプチャで実測確認済み。
-        // Z80ソース(music.asm:2700)のv12-v15は{0x15,0x12,0x10,0x0D}だが
-        // コンパイル済みバイナリの実測値は{0x0A,0x08,0x05,0x02}。
-        // v=0 → 0x36(最大減衰), v=15 → 0x02(最小減衰)
+        // MUCOM88 FMVDAT テーブル（+4 オフセット補正済み）
+        // Z80 music.asm:2700 の20エントリテーブルに対し、OpenMUCOM88は
+        // volume N → FMVDAT[N+4] でアクセスする（STV1: A = TOTALV + C, TOTALV初期値=4）。
+        // よって v0-15 → FMVDAT[4]-FMVDAT[19] を使用。
         static const int fmVolTable[16] = {
-            0x36, 0x33, 0x30, 0x2D, 0x2A, 0x28, 0x25, 0x22,
-            0x20, 0x1D, 0x1A, 0x18, 0x0A, 0x08, 0x05, 0x02
+            0x2A, 0x28, 0x25, 0x22, 0x20, 0x1D, 0x1A, 0x18,
+            0x15, 0x12, 0x10, 0x0D, 0x0A, 0x08, 0x05, 0x02
         };
         int tlBase = fmVolTable[std::clamp(vol, 0, 15)];
 
@@ -1312,7 +1333,7 @@ private:
 
     // Z80 SSGDAT テーブル（music.asm:2162）
     // SSG @N プリセット: 各6バイト = AL, AR, DR, SL, SR, RR
-    static constexpr int SSGDAT_COUNT = 9;
+    static constexpr int SSGDAT_COUNT = 16;
     static constexpr int SSGDAT[SSGDAT_COUNT][6] = {
         {255,255,255,255,  0,255},  // @0: 持続（エンベロープなし相当）
         {255,255,255,200,  0, 10},  // @1: 標準サステイン
@@ -1323,6 +1344,13 @@ private:
         { 40, 70, 14,190,  0, 15},  // @6: アタック40
         {120, 30,255,255,  0, 10},  // @7
         {255,255,255,225,  8, 15},  // @8
+        {255,255,255,  1,255,255},  // @9: 最小サステイン
+        {255,255,255,200,  8,255},  // @10
+        {255,255,255,220, 20,  8},  // @11: ノコギリ風
+        {255,255,255,255,  0, 10},  // @12
+        {255,255,255,255,  0, 10},  // @13
+        {120, 80,255,255,  0,255},  // @14: パーカッション
+        {255,255,255,220,  0,255},  // @15: ノイズ/BOM
     };
 
     // Z80 OTOSSG → OTOCAL → ENVPST: SSGDATプリセットをソフトウェアエンベロープに適用

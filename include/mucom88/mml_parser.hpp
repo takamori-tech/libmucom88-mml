@@ -337,7 +337,9 @@ private:
         int      patch     = 0;
         int      pan       = 3;
         int      staccato  = 0;   // q: 0=レガート（MUCOM88デフォルト）
+        int      detune    = 0;   // D: デチューン（F-Numberオフセット）
         int      transpose = 0;   // k: キートランスポーズ（半音単位）
+        bool     defLenIsClock = false; // l%N指定時: defLenがクロック値
         uint32_t tick      = 0;
         int      wholeTick = WHOLE_TICK; // Cコマンドで変更可能（デフォルトC128=128）
         bool     tieActive = false; // 行末タイ(&)継続フラグ
@@ -565,9 +567,14 @@ private:
         while (pos < mml.size()) {
             char c = std::tolower((unsigned char)mml[pos]);
 
-            // 空白・コメントスキップ
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '_') {
+            // 空白・区切り文字スキップ（|=視認性用区切り、Wiki準拠）
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '_' || c == '|') {
                 pos++;
+                continue;
+            }
+            // : — これ以降コンパイルしない（Wiki準拠）
+            if (c == ':') {
+                pos = mml.size();
                 continue;
             }
             if (c == ';') {
@@ -633,6 +640,34 @@ private:
                         }
                     }
                 }
+                continue;
+            }
+
+            // 大文字 T = テンポ（BPM指定）→ Timer-B値に変換
+            // 小文字 t = Timer-B直接値（switch文内で処理）
+            if (mml[pos] == 'T' && pos + 1 < mml.size()
+                && std::isdigit((unsigned char)mml[pos + 1])) {
+                pos++;
+                int bpm = readInt(mml, pos, 120);
+                // BPM → Timer-B値変換
+                // Timer-B period = (256-T) * 16 / fmclock
+                // fmclock = 7987200/2/6/12 = 55466
+                // tick per minute = fmclock / 16 / (256-T)
+                // BPM = tick_per_min / PPQ_quarter
+                // ここで PPQ_quarter = wholeTick/4 (C128の場合32)
+                // T = 256 - fmclock / (16 * BPM * PPQ_quarter / 60)
+                // T = 256 - 60 * fmclock / (16 * BPM * PPQ_quarter)
+                static constexpr int FMCLOCK_INT = 7987200 / 2 / 6 / 12;  // 55466
+                int ppqQ = st.wholeTick / 4;  // 4分音符あたりのクロック数
+                if (ppqQ <= 0) ppqQ = 32;
+                if (bpm <= 0) bpm = 120;
+                int tb = 256 - (int)(60.0 * FMCLOCK_INT / (16.0 * bpm * ppqQ));
+                tb = std::clamp(tb, 0, 255);
+                st.tempo = tb;
+                MmlEvent ev{};
+                ev.type = MmlEventType::TEMPO;
+                ev.tick = st.tick; ev.value = tb; ev.channel = ch;
+                events.push_back(ev);
                 continue;
             }
 
@@ -786,11 +821,20 @@ private:
             }
 
             // 大文字 D = デチューンコマンド（音符 d と区別）
+            // Wiki: D+N = 相対（現在値に加算）、DN / D-N = 絶対指定
             if (mml[pos] == 'D') {
                 pos++;
                 int detune = 0;
+                bool relative = false;
+                if (pos < mml.size() && mml[pos] == '+') {
+                    relative = true;
+                    pos++;
+                }
                 if (pos < mml.size() && (std::isdigit((unsigned char)mml[pos]) || mml[pos] == '-'))
                     detune = readInt(mml, pos, 0);
+                if (relative)
+                    detune = st.detune + detune;  // 相対: 現在値に加算
+                st.detune = detune;
                 MmlEvent ev{};
                 ev.type = MmlEventType::DETUNE;
                 ev.tick = st.tick; ev.value = detune; ev.channel = ch;
@@ -828,15 +872,22 @@ private:
             // 休符
             if (c == 'r') {
                 pos++;
-                int len = 0;
-                if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
-                    len = readInt(mml, pos, st.defLen);
-                else
-                    len = st.defLen;
-                int dotCount = 0;
-                while (pos < mml.size() && mml[pos] == '.') { dotCount++; pos++; }
-                bool tieDummy = false;
-                uint32_t ticks = calcTicks(len, dotCount, st, mml, pos, tieDummy);
+                uint32_t ticks;
+                if (pos < mml.size() && mml[pos] == '%') {
+                    // r%N: クロック直接指定
+                    pos++;
+                    ticks = readInt(mml, pos, 0);
+                } else {
+                    int len = 0;
+                    if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
+                        len = readInt(mml, pos, st.defLen);
+                    else
+                        len = st.defLen;
+                    int dotCount = 0;
+                    while (pos < mml.size() && mml[pos] == '.') { dotCount++; pos++; }
+                    bool tieDummy = false;
+                    ticks = calcTicks(len, dotCount, st, mml, pos, tieDummy);
+                }
 
                 MmlEvent ev{};
                 ev.type     = MmlEventType::REST;
@@ -849,13 +900,12 @@ private:
             }
 
             switch (c) {
-            case 't': {  // テンポ（BPM）
-                // MUCOM88 Wikiでは t=Timer-B直接値、T=BPM と記載されているが、
-                // checkmucom88の実測値（sq1_103 T173→56.1s, sq1_104 T218→74.9s）は
-                // BPM式 samplesPerTick = sampleRate*60/(T*PPQ) と完全一致する。
-                // よってt/Tどちらも BPM として扱う。
+            case 't': {  // テンポ（Timer-B直接値）
+                // MUCOM88 Wiki: t = FM音源チップのタイマーBの数値を直接指定
+                // MmlEngineのrecalcTimerB()で (256-t) を使ってTimer-B周期を計算する。
+                // 大文字 T（BPM指定）は tolower 前のブロックで Timer-B値に変換済み。
                 pos++;
-                st.tempo = readInt(mml, pos, 120);
+                st.tempo = readInt(mml, pos, 200);
                 MmlEvent ev{};
                 ev.type = MmlEventType::TEMPO;
                 ev.tick = st.tick; ev.value = st.tempo; ev.channel = ch;
@@ -882,7 +932,11 @@ private:
                         rw.value = 0xC0 | (ilevel & 0x1F);  // L+R + level
                         events.push_back(rw);
                     }
+                } else if (ch == 10) {
+                    // ADPCM-B: v 0-255（Wiki準拠）
+                    st.volume = std::clamp(readInt(mml, pos, 128), 0, 255);
                 } else {
+                    // FM/SSG: v 0-15
                     st.volume = std::clamp(readInt(mml, pos, 12), 0, 15);
                 }
                 MmlEvent ev{};
@@ -893,7 +947,15 @@ private:
             }
             case 'l': {  // デフォルト音長
                 pos++;
-                st.defLen = readInt(mml, pos, 4);
+                if (pos < mml.size() && mml[pos] == '%') {
+                    // l%N: デフォルト音長をクロック直接値で指定
+                    pos++;
+                    st.defLen = readInt(mml, pos, 32);
+                    st.defLenIsClock = true;
+                } else {
+                    st.defLen = readInt(mml, pos, 4);
+                    st.defLenIsClock = false;
+                }
                 break;
             }
             case 'o': {  // オクターブ
@@ -1051,7 +1113,8 @@ private:
                 int delta = 1;
                 if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
                     delta = readInt(mml, pos, 1);
-                st.volume = std::min(st.volume + delta, 15);
+                int maxVol = (ch == 10) ? 255 : (ch == 6) ? 63 : 15;  // ADPCM=256段階, リズム=64, FM/SSG=16
+                st.volume = std::min(st.volume + delta, maxVol);
                 MmlEvent ev{};
                 ev.type = MmlEventType::VOLUME;
                 ev.tick = st.tick; ev.value = st.volume; ev.channel = ch;
@@ -1185,13 +1248,42 @@ private:
             }
             case 'y': {
                 // 直接レジスタ書き込み y<addr>,<data>
-                // yXX,NN,NN 形式の文字列レジスタ名（MUCOM88拡張）はスキップ
+                // yXX,slot,data 形式: FM拡張レジスタ名
                 pos++;
                 if (pos < mml.size() && std::isalpha((unsigned char)mml[pos])) {
-                    // 文字列レジスタ名: カンマ区切りパラメータを全てスキップ
-                    while (pos < mml.size() && mml[pos] != ' ' && mml[pos] != '\t'
-                           && mml[pos] != '\n' && mml[pos] != '\r'
-                           && mml[pos] != ';' && !std::islower((unsigned char)mml[pos])) pos++;
+                    // 拡張レジスタ名をパース
+                    std::string regName;
+                    while (pos < mml.size() && std::isalpha((unsigned char)mml[pos])) {
+                        regName += (char)std::toupper((unsigned char)mml[pos]);
+                        pos++;
+                    }
+                    // yDM/yTL/yKA/yDR/ySR/ySL/ySE → ベースレジスタ
+                    int baseReg = -1;
+                    if      (regName == "DM") baseReg = 0x30;
+                    else if (regName == "TL") baseReg = 0x40;
+                    else if (regName == "KA") baseReg = 0x50;
+                    else if (regName == "DR") baseReg = 0x60;
+                    else if (regName == "SR") baseReg = 0x70;
+                    else if (regName == "SL") baseReg = 0x80;
+                    else if (regName == "SE") baseReg = 0x90;
+
+                    if (baseReg >= 0) {
+                        // ,slot,data
+                        int slot = 0, data = 0;
+                        if (pos < mml.size() && mml[pos] == ',') { pos++; slot = readInt(mml, pos, 0); }
+                        if (pos < mml.size() && mml[pos] == ',') { pos++; data = readInt(mml, pos, 0); }
+                        // スロット(0-3) → YM2608オペレーターオフセット
+                        static const int slotOff[] = { 0, 8, 4, 12 };
+                        int off = (slot >= 0 && slot <= 3) ? slotOff[slot] : 0;
+                        int addr = baseReg + off;
+                        MmlEvent ev{};
+                        ev.type = MmlEventType::REG_WRITE;
+                        ev.tick = st.tick; ev.channel = ch;
+                        ev.note = addr;
+                        ev.value = data;
+                        events.push_back(ev);
+                    }
+                    // 未知のレジスタ名はスキップ
                     break;
                 }
                 int addr = readInt(mml, pos, 0);
@@ -1209,12 +1301,13 @@ private:
                 break;
             }
             case 'k': {
-                // キートランスポーズ: 全ノートを N 半音シフト（MUCOM88 k コマンド）
+                // キートランスポーズ相対指定（v1.7）: 現在値に加算（Wiki準拠）
+                // 大文字 K は tolower 前のブロックで絶対指定として処理済み
                 pos++;
                 int trans = 0;
                 if (pos < mml.size() && (std::isdigit((unsigned char)mml[pos]) || mml[pos] == '-'))
                     trans = readInt(mml, pos, 0);
-                st.transpose = trans;
+                st.transpose += trans;  // 相対: 現在値に加算
                 MmlEvent ev{};
                 ev.type = MmlEventType::KEY_TRANSPOSE;
                 ev.tick = st.tick; ev.value = trans; ev.channel = ch;
@@ -1243,8 +1336,9 @@ private:
                 break;
             }
             case '!': {
-                // コマンド ! — スキップ
-                pos++;
+                // Wiki: このパートのこれ以降を全て休符とする（発音しない）
+                // パースループを抜けて以降のMMLを無視
+                pos = mml.size();
                 break;
             }
             // case 'R' は不要（tolower前に大文字Rとして処理済み）
@@ -1286,12 +1380,20 @@ private:
             else if (nc == '-')          { semi--;  pos++; }
         }
 
-        // 音長（数字があれば、なければデフォルト）
+        // 音長（%N=クロック直接、数字=音符分割、なければデフォルト）
         int len = 0;
-        if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
+        uint32_t directTicks = 0;  // %N指定時のクロック直接値
+        if (pos < mml.size() && mml[pos] == '%') {
+            pos++;
+            directTicks = readInt(mml, pos, 0);
+        } else if (pos < mml.size() && std::isdigit((unsigned char)mml[pos])) {
             len = readInt(mml, pos, st.defLen);
-        else
+        } else if (st.defLenIsClock) {
+            // l%N でデフォルト音長がクロック値の場合
+            directTicks = st.defLen;
+        } else {
             len = st.defLen;
+        }
 
         // 付点（複数ドット対応: b4.. = 24+12+6 = 42）
         int dotCount = 0;
@@ -1299,7 +1401,49 @@ private:
 
         // `^` クロック延長（MUCOM88独自）と `&` タイを処理してtickを累積
         bool tieOut = false;
-        uint32_t ticks = calcTicks(len, dotCount, st, mml, pos, tieOut);
+        uint32_t ticks;
+        if (directTicks > 0) {
+            // %N: クロック直接指定（付点・分割なし）
+            ticks = directTicks;
+            // ^延長・&タイは引き続き処理
+            while (pos < mml.size() && mml[pos] == '^') {
+                pos++;
+                if (pos < mml.size() && mml[pos] == '%') {
+                    pos++;
+                    ticks += readInt(mml, pos, 0);
+                } else {
+                    int elen = 0;
+                    if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
+                        elen = readInt(mml, pos, 0);
+                    else
+                        elen = st.defLen;
+                    if (elen <= 0) elen = 4;
+                    ticks += st.wholeTick / elen;
+                }
+            }
+            // &タイ
+            while (pos < mml.size() && mml[pos] == '&') {
+                pos++;
+                while (pos < mml.size() && (mml[pos] == ' ' || mml[pos] == '\t')) pos++;
+                if (pos >= mml.size()) { tieOut = true; break; }
+                char nc = std::tolower((unsigned char)mml[pos]);
+                if (!(nc >= 'a' && nc <= 'g')) { tieOut = true; break; }
+                pos++;
+                if (pos < mml.size() && (mml[pos]=='+' || mml[pos]=='#' || mml[pos]=='-')) pos++;
+                int tlen = 0;
+                if (pos < mml.size() && mml[pos] == '%') {
+                    pos++;
+                    ticks += readInt(mml, pos, 0);
+                } else if (pos < mml.size() && std::isdigit((unsigned char)mml[pos])) {
+                    tlen = readInt(mml, pos, st.defLen);
+                    ticks += st.wholeTick / tlen;
+                } else {
+                    ticks += st.wholeTick / st.defLen;
+                }
+            }
+        } else {
+            ticks = calcTicks(len, dotCount, st, mml, pos, tieOut);
+        }
 
         // ノート番号（MIDI準拠: C4=60）+ キートランスポーズ
         int noteNum = (st.octave + 1) * 12 + semi + st.transpose;
@@ -1475,30 +1619,47 @@ private:
     // ==========================================================================
     // ユーティリティ
     // ==========================================================================
-    // 整数読み込み（16進数 $ プレフィックス対応）
+    // 整数読み込み（負号・16進数 $ プレフィックス対応）
     static int readInt(const std::string& s, size_t& pos, int defVal)
     {
         if (pos >= s.size()) return defVal;
+
+        // 負号処理
+        bool negative = false;
+        if (s[pos] == '-') {
+            negative = true;
+            pos++;
+            if (pos >= s.size() || (!std::isdigit((unsigned char)s[pos]) && s[pos] != '$')) {
+                pos--;  // 負号だけで数字がない場合は戻す
+                return defVal;
+            }
+        }
+
         // 16進数: $XXXX
         if (s[pos] == '$') {
             pos++;
-            if (pos >= s.size() || !std::isxdigit((unsigned char)s[pos]))
+            if (pos >= s.size() || !std::isxdigit((unsigned char)s[pos])) {
+                if (negative) pos--;  // $の前の-も戻す
                 return defVal;
+            }
             int val = 0;
             while (pos < s.size() && std::isxdigit((unsigned char)s[pos])) {
                 char c = std::tolower((unsigned char)s[pos]);
                 val = val * 16 + (c >= 'a' ? c - 'a' + 10 : c - '0');
                 pos++;
             }
-            return val;
+            return negative ? -val : val;
         }
-        if (!std::isdigit((unsigned char)s[pos])) return defVal;
+        if (!std::isdigit((unsigned char)s[pos])) {
+            if (negative) pos--;  // 負号だけで数字がない場合は戻す
+            return defVal;
+        }
         int val = 0;
         while (pos < s.size() && std::isdigit((unsigned char)s[pos])) {
             val = val * 10 + (s[pos] - '0');
             pos++;
         }
-        return val;
+        return negative ? -val : val;
     }
 
     // セパレーター（数字以外の区切り）をスキップ
