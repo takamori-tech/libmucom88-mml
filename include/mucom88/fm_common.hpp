@@ -1,8 +1,8 @@
 // =============================================================================
 // fm_common.hpp
-// YM2608 (OPNA) 共通定義
+// YM2608 (OPNA) / YM2151 (OPM) 共通定義
 //
-// ゲーム本体 (mml_parser/mml_engine) と VST プラグイン (OpnaEngine) で共有。
+// CLAUDIUS (ゲーム), MUCOM88V (VST), mucom88ex (CLIツール) で共有。
 // =============================================================================
 
 #pragma once
@@ -31,8 +31,14 @@ struct FmPatch {
         int tl  = 0;   // Total Level  (0-127, lower=louder)
         int ks  = 0;   // Key Scale    (0-3)
         int ml  = 1;   // Multiple     (0-15)
-        int dt  = 0;   // Detune       (0-7)
+        int dt  = 0;   // Detune       (0-7, OPN系DT)
+        int dt2 = 0;   // Detune2      (0-3, OPM固有 — 非整数倍音的金属的響き)
     } op[4];
+
+    // OPM拡張パラメータ（voice.dat バイト25-27、後方互換）
+    bool isOpm = false;   // true=OPM音色, false=OPN音色
+    int  pms   = 0;       // Phase Modulation Sensitivity (0-7, OPM LFO)
+    int  ams   = 0;       // Amplitude Modulation Sensitivity (0-3, OPM LFO)
 
     bool valid = false;
 };
@@ -127,6 +133,14 @@ inline FmPatch parseVoiceDatEntry(const uint8_t* voiceDat, size_t dataSize, int 
         op.sl = (sl_rr >> 4) & 0x0F;
         op.rr = sl_rr & 0x0F;
     }
+    // OPM拡張フィールド（voice.dat バイト25-27、後方互換）
+    // バイト25: OPMフラグ (0x00=OPN, 0x01=OPM)
+    // バイト26: DT2パック (op1:bit1-0, op2:bit3-2, op3:bit5-4, op4:bit7-6)
+    // バイト27: PMS(bit6-4) / AMS(bit1-0)
+    // 注: バイト25はFB/ALと共用。OPNモードではFB/AL、OPMモードではフラグ。
+    // OPM判定は音色名領域（byte 26-31）のパターンで行う。
+    // 現時点ではisOpm=falseのまま（将来のG2モード用に予約）。
+
     p.valid = true;
     return p;
 }
