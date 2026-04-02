@@ -458,6 +458,7 @@ public:
             // ランタイム状態リセット（全可変状態をデフォルト値に復元）
             // Issue #19: ループ2周目以降のSSGピッチずれ修正
             st.currentNote  = 0;
+            st.noteOnCount  = 0;  // UI activityカウンタもリセット
             st.reverbActive = false;
             st.portaActive  = false;
             // ピッチ関連
@@ -537,6 +538,29 @@ public:
                     }
                     break;
                 }
+                case MmlEventType::PORTAMENTO: {
+                    // ポルタメント状態の復元（processEvents側と同一ロジック）
+                    int startNote = ev.note;
+                    int endNote   = ev.value;
+                    int dur       = (int)ev.duration;
+                    if (dur <= 0) dur = 1;
+                    int sb = 0, eb = 0;
+                    uint16_t sf = noteToFnum(startNote, sb);
+                    uint16_t ef = noteToFnum(endNote, eb);
+                    int startBF = (sb << 11) | sf;
+                    int endBF   = (eb << 11) | ef;
+                    st.portaActive      = true;
+                    st.portaStartFnum   = startBF;
+                    st.portaEndFnum     = endBF;
+                    st.portaCurrentFnum = startBF;
+                    st.portaTicksLeft   = dur;
+                    st.portaStep        = (endBF - startBF) / dur;
+                    break;
+                }
+                case MmlEventType::HARDWARE_LFO:
+                    // HW LFO設定はレジスタ書き込みのみ（復元はplay後の再生で行われる）
+                    // ここではst側の状態変更がないのでbreak
+                    break;
                 case MmlEventType::REVERB_ENVELOPE:
                     st.reverbValue = ev.value; st.reverbEnabled = true; break;
                 case MmlEventType::REVERB_SWITCH:
