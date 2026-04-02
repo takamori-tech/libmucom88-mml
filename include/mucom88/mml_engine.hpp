@@ -204,6 +204,9 @@ public:
     int  chNote(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].currentNote : 0; }
     int  chVolume(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].volume : 0; }
     int  chPan(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].pan : 3; }
+    // noteOnトリガーカウンター（UI activity検出用、advance()毎にインクリメント）
+    // chNoteOn()はワンショット楽器で一瞬falseになるため、カウンターで検出する
+    uint32_t chNoteOnCount(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].noteOnCount : 0; }
     // FM パッチ番号取得（fi=FMインデックス 0-5）
     int  fmPatchNo(int fi) const { return (fi >= 0 && fi < MAX_FM_CHANNELS) ? m_fmPatchNo[fi] : -1; }
 
@@ -489,6 +492,7 @@ private:
         std::vector<MmlEvent> events;
         size_t   eventIdx    = 0;
         bool     noteOn      = false;
+        uint32_t noteOnCount = 0;     // noteOnトリガーカウンター（UI activity検出用）
         int      currentNote = 0;
         int      staccato    = 0;
         int      volume      = 12;
@@ -622,6 +626,7 @@ private:
                     }
                 }
                 st.noteOn       = true;
+                st.noteOnCount++;
                 st.currentNote  = ev.note;
                 st.ssgReleasing = false;
                 st.reverbActive = false;
