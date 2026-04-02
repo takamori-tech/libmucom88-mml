@@ -118,13 +118,19 @@ public:
         m_globalSampleAccum = 0;
         m_audioLeftMs       = 0.0;
         m_globalTempo       = 120;
-        // 最初のTEMPOイベントを探して初期テンポを設定
-        m_loopTickOffset = 0;
+        m_loopTickOffset    = 0;
+
+        // 全チャンネルのランタイム状態をフルリセット（libmucom88-mml#2）
+        // イベント列(events)は保持し、再生位置とランタイム状態のみ初期化
         for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
             auto& st = m_channels[ch];
-            st.eventIdx   = 0;
-            st.noteOn     = false;
-            for (const auto& ev : st.events) {
+            auto savedEvents = std::move(st.events);
+            st = ChannelState{};
+            st.events = std::move(savedEvents);
+        }
+        // 最初のTEMPOイベントを探して初期テンポを設定
+        for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
+            for (const auto& ev : m_channels[ch].events) {
                 if (ev.type == MmlEventType::TEMPO) {
                     m_globalTempo = ev.value;
                     break;
@@ -168,16 +174,8 @@ public:
             if (m_overrideEndTick > 0)
                 m_commonEndTick = m_overrideEndTick;
 
-            // Z80コンパイラ互換: 全チャンネルのイベントをcommonEndTickで打ち切り
-            // Z80コンパイラは全チャンネルをMaxCount(=commonEndTick)にパディングする。
-            // パーサーがcommonEndTickを超えるイベントを生成した場合、それらは無効。
-            if (m_commonEndTick > 0) {
-                for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
-                    auto& evs = m_channels[ch].events;
-                    while (!evs.empty() && evs.back().tick >= m_commonEndTick)
-                        evs.pop_back();
-                }
-            }
+            // Z80コンパイラ互換: commonEndTickを超えるイベントは再生時にスキップ
+            // イベント列自体は破壊しない（play()の再呼び出しに対応、libmucom88-mml#2）
         }
         // Timer-B 初期化
         recalcTimerB();
@@ -692,6 +690,11 @@ private:
         uint32_t chTick = tick - m_loopTickOffset;
         while (st.eventIdx < st.events.size()) {
             const MmlEvent& ev = st.events[st.eventIdx];
+            // commonEndTickを超えるイベントはスキップ（非破壊打ち切り、libmucom88-mml#2）
+            if (m_commonEndTick > 0 && ev.tick >= m_commonEndTick) {
+                st.eventIdx = st.events.size();  // 残りイベントを全スキップ
+                break;
+            }
             if (ev.tick > chTick) break;
 
             switch (ev.type) {
