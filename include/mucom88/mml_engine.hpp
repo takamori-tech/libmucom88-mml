@@ -359,19 +359,21 @@ public:
 
                 m_globalTick        = loopTick;
                 m_globalSampleAccum = 0;
+                m_audioLeftMs       = 0.0;  // Timer-B残余ミリ秒リセット
                 m_globalTempo       = 120;
 
-                // 全チャンネル KEY_OFF（allSoundOffではなく穏やかな停止）
+                // 全チャンネル KEY_OFF
                 for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                     if (m_channels[ch].noteOn) {
                         if      (isFM(ch))  fmKeyOff(toFMIndex(ch));
                         else if (isSSG(ch)) ssgKeyOff(toSSGIndex(ch));
-                        m_channels[ch].noteOn = false;
                     }
                 }
 
                 for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                     auto& st = m_channels[ch];
+
+                    // eventIdx をループ再開位置に設定
                     if (st.hasLoopPoint) {
                         st.eventIdx = st.loopEventIdx;
                     } else {
@@ -385,10 +387,25 @@ public:
                             }
                         }
                     }
-                    st.noteOn = false;
+
+                    // チャンネル状態を初期値にリセット
+                    st.noteOn       = false;
+                    st.currentNote  = 0;
+                    st.reverbActive = false;
+                    st.reverbEnabled = false;
+                    st.reverbValue  = 0;
+                    st.reverbQCutOnly = false;
+                    st.portaActive  = false;
+                    st.lfoPitchOffset = 0;
+                    st.lfoDelayCounter = 0;
+                    st.lfoStepCounter  = 0;
+                    st.lfoRateCounter  = 0;
+                    st.lfoDirection    = 1;
+                    st.ssgReleasing = false;
+                    st.ssgEnvPhase  = 0;
+                    st.ssgEnvValue  = 0;
 
                     // ループ再開位置までのイベントを走査して状態を復元
-                    // （PATCH/VOLUME/PAN/STACCATO/TEMPO/DETUNE/LFO等）
                     for (size_t i = 0; i < st.eventIdx; i++) {
                         const auto& ev = st.events[i];
                         switch (ev.type) {
@@ -400,8 +417,9 @@ public:
                             break;
                         case MmlEventType::PATCH:
                             if (isFM(ch)) {
-                                int fi = toFMIndex(ch);
-                                m_fmPatchNo[fi] = ev.value;
+                                m_fmPatchNo[toFMIndex(ch)] = ev.value;
+                            } else if (isSSG(ch)) {
+                                ssgApplyPreset(toSSGIndex(ch), ev.value);
                             }
                             break;
                         case MmlEventType::PAN:
@@ -420,25 +438,46 @@ public:
                             st.lfoDepth = ev.vibDepth;
                             st.lfoCount = ev.vibCount;
                             break;
+                        case MmlEventType::REVERB_ENVELOPE:
+                            st.reverbValue = ev.value;
+                            st.reverbEnabled = true;
+                            break;
+                        case MmlEventType::REVERB_SWITCH:
+                            st.reverbEnabled = (ev.value != 0);
+                            break;
+                        case MmlEventType::REVERB_MODE:
+                            st.reverbQCutOnly = (ev.value != 0);
+                            break;
+                        case MmlEventType::SSG_ENVELOPE:
+                            st.ssgSoftEnv = true;
+                            st.ssgEnvAL = ev.envAL;
+                            st.ssgEnvAR = ev.envAR;
+                            st.ssgEnvDR = ev.envDR;
+                            st.ssgEnvSL = ev.envSL;
+                            st.ssgEnvSR = ev.envSR;
+                            st.ssgEnvRR = ev.envRR;
+                            break;
                         default:
                             break;
                         }
                     }
                 }
-                // 復元した音色をチップに適用（KEY_ONなしで音色レジスタのみ）
+                // Timer-B再計算 + 音色/PAN復元
                 recalcTimerB();
+                m_timerBCount = m_timerBPeriod;  // カウンタをフル周期にリセット
                 for (int fi = 0; fi < MAX_FM_CHANNELS; fi++)
                     fmApplyPatch(fi, m_fmPatchNo[fi]);
-                // FM PAN復元
                 for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                     if (isFM(ch)) {
                         int fi = toFMIndex(ch);
                         int port = fmPort(fi);
                         int off  = fmOffset(fi);
                         m_engine->writeReg(port, 0xB4 + off,
-                            (uint8_t)(panToReg(m_channels[ch].pan) | 0x00));
+                            (uint8_t)(panToReg(m_channels[ch].pan)));
                     }
                 }
+                // SSGミキサー復元
+                m_engine->writeReg(0, 0x07, m_ssgMixer);
             } else {
                 stop();
             }
