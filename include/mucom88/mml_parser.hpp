@@ -162,11 +162,15 @@ public:
     // ==========================================================================
     // MucFile: .muc ファイル全体をパースした結果
     // ==========================================================================
+    // 音源チップモード（MUCOM88EX拡張: #mode ディレクティブ）
+    enum class ChipMode { OPNA, OPM, OPNB };
+
     struct MucFile {
         std::string title;
         std::string composer;
         std::string voiceFile;
         std::string pcmFile;
+        ChipMode    chipMode  = ChipMode::OPNA; // デフォルトOPNA（#mode未指定時）
         int         wholeTick = WHOLE_TICK;  // Cコマンドの値（デフォルト128）
 
         // チャンネルごとのイベント列（インデックス = チャンネル番号）
@@ -373,6 +377,18 @@ private:
         else if (startsWith("#composer")) result.composer = getValue(9);
         else if (startsWith("#voice"))   result.voiceFile = getValue(6);
         else if (startsWith("#pcm"))     result.pcmFile   = getValue(4);
+        else if (startsWith("#mode")) {
+            // MUCOM88EX拡張: #mode OPNA / #mode OPM / #mode OPNB
+            auto mode = getValue(5);
+            // 大文字に正規化
+            for (auto& c : mode) c = (char)std::toupper((unsigned char)c);
+            // 末尾空白・改行除去
+            while (!mode.empty() && (mode.back() == ' ' || mode.back() == '\r' || mode.back() == '\n'))
+                mode.pop_back();
+            if (mode == "OPM" || mode == "G2")        result.chipMode = ChipMode::OPM;
+            else if (mode == "OPNB" || mode == "NG")  result.chipMode = ChipMode::OPNB;
+            else                                       result.chipMode = ChipMode::OPNA;
+        }
     }
 
     // ==========================================================================
