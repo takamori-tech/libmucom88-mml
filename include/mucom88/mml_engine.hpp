@@ -1427,26 +1427,26 @@ private:
     //   fmgenEngine.loadPcmDataToAdpcmB(data + 0x400, size - 0x400);
     // loadPcmData() はPCMADRテーブルのみを解析する
 
-    // Z80 PCMNMBテーブル（music.asm:3012-3015、+200/+120オフセット込み）
+    // Z80 PCMNMBテーブル（music.asm:3012-3015）
+    // DW 49BAH+200 は Z80アセンブラで 0x49BA + 200(10進) = 0x49BA + 0xC8
     // C, C#, D, D#, E, F, F#, G, G#, A, A#, B
-    // Z80 PCMNMBテーブル（music.asm:3012-3015 ベース値）
-    // ソースには +200/+120 オフセットがあるが、OpenMUCOM88との実測比較では
-    // ベース値のみのほうがavgRMSが高い（+200はバージョン差異の可能性）
     static constexpr uint16_t PCMNMB[12] = {
-        0x49BA, 0x4E1C, 0x52C1, 0x57AD,  // C, C#, D, D#
-        0x5CE4, 0x626A, 0x6844, 0x6E77,  // E, F, F#, G
-        0x7509, 0x7BFE, 0x835E, 0x8B2D   // G#, A, A#, B
+        0x49BA + 200, 0x4E1C + 200, 0x52C1 + 200, 0x57AD + 200,  // C, C#, D, D#
+        0x5CE4 + 200, 0x626A + 200, 0x6844 + 200, 0x6E77 + 200,  // E, F, F#, G
+        0x7509 + 200, 0x7BFE + 120, 0x835E + 200, 0x8B2D + 200   // G#, A(+120), A#, B
     };
 
     // ノート番号からADPCM-BデルタN値を計算（Z80 PCMGFQ互換）
     // Z80: note byte 上位ニブル=シフト回数, 下位ニブル=音名(0-11)
-    // MIDIオクターブ(noteNum/12)をそのままシフト量として使用（実測ベスト）
+    // MMLのo1がADPCM-Bの基準オクターブ（shift=0、原速再生）。
+    // noteNum = (octave+1)*12 + semi なので o1c=24。shift = noteNum/12 - 2。
     uint16_t adpcmbNoteToDeltaN(int noteNum)
     {
         int semi    = noteNum % 12;
-        int shift   = noteNum / 12;
+        int shift   = noteNum / 12 - 2;  // o1 = shift 0
         uint32_t dn = PCMNMB[semi];
         if (shift > 0) dn >>= shift;
+        else if (shift < 0) dn <<= (-shift);  // o1より高いオクターブ
         return (uint16_t)(dn & 0xFFFF);
     }
 
