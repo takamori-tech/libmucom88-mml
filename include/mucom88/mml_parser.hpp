@@ -1556,14 +1556,16 @@ private:
           }
         }
 
-        // `^` 音長延長（MUCOM88: ^N で N分音符分延長、^単独はデフォルト音長分）
+        // `^` 音長延長（MUCOM88: ^N で N分音符分延長、^単独はデフォルト音長(l値)分）
+        // Z80互換: ^の後に数値がない場合はdefLen（lコマンドで設定）を使用
+        // ノート自体の音長ではない（例: l4 e1^. = 128 + dotted_l4(48) = 176）
         while (pos < mml.size() && mml[pos] == '^') {
             pos++;
             int elen = 0;
             if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
                 elen = readInt(mml, pos, 0);
             else
-                elen = len;  // 元の音長と同じ
+                elen = st.defLen;  // Z80互換: デフォルト音長(lコマンド値)
             if (elen <= 0) elen = 4;
             uint32_t et = applyDots(wt / elen, mml, pos);
             ticks += et;
