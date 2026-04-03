@@ -374,8 +374,14 @@ public:
                         // Z80 SSSUB0: BIT 7,(IX+6) → エンベロープ有効時のみSOFENV呼び出し
                         // 発音中(noteOn)またはRELEASE中(phase>0)のみ処理。
                         // 未発音時（休符等）はSOFENVを回さない（Z80と同じ）。
-                        if (cst.ssgEnvPhase > 0)
+                        // Z80互換: KEY_ON tickではSOFENV進行をスキップ（SOFEV7のみ）
+                        // Z80 SSSUBG: envValue=AL → CALL SOFEV7（音量計算のみ）
+                        // Z80 SSSUB0: CALL SOFENV（エンベロープ進行+音量計算）← 次tick以降
+                        if (cst.ssgEnvKeyOnTick) {
+                            cst.ssgEnvKeyOnTick = false;
+                        } else if (cst.ssgEnvPhase > 0) {
                             ssgTickEnvelope(ch);
+                        }
                         int vol = std::clamp(cst.volume - m_globalAtt / 4, 0, 15);
                         int amp = ((vol + 1) * cst.ssgEnvValue) >> 8;
                         // SOFEV7リバーブ（Z80 music.asm:2336-2342）:
@@ -484,6 +490,7 @@ public:
             st.ssgEnvSL = st.ssgEnvSR = st.ssgEnvRR = 0;
             st.ssgEnvPhase  = 0;
             st.ssgEnvValue  = 0;
+            st.ssgEnvKeyOnTick = false;
             st.ssgReleasing = false;
             st.ssgRelVol    = 0;
             // リバーブ
@@ -622,6 +629,7 @@ private:
         // ADSR状態: 0=OFF, 1=ATTACK, 2=DECAY, 3=SUSTAIN, 4=RELEASE
         int      ssgEnvPhase  = 0;
         int      ssgEnvValue  = 0;     // 現在のエンベロープ値（0-255）
+        bool     ssgEnvKeyOnTick = false; // Z80互換: KEY_ON tickではSOFENV進行をスキップ
         bool     ssgReleasing = false; // リリース中フラグ（Eコマンド未使用時の簡易版）
         int      ssgRelVol    = 0;     // リリース中の現在音量（簡易版）
         // デチューン: F-Numberオフセット（D コマンド）
@@ -717,6 +725,23 @@ private:
             // commonEndTickを超えるイベントはスキップ（非破壊打ち切り、libmucom88-mml#2）
             // 同一tickのイベントは処理する（libmucom88-mml#3: >= → >）
             if (m_commonEndTick > 0 && ev.tick > m_commonEndTick) {
+                // libmucom88-mml#5: SSG残留音防止
+                // ブラケットループ展開でcommonEndTickを超えるNOTE_OFFがスキップされ
+                // SSGが発音したまま残る問題を修正。Z80ではglobalLoopRestartで
+                // 全チャンネルがKEY_OFFされるため、ここで明示的に消音する。
+                if (st.noteOn) {
+                    if (isSSG(ch)) {
+                        if (st.ssgSoftEnv) {
+                            st.ssgEnvPhase = 4;  // RELEASE
+                        } else {
+                            ssgKeyOff(toSSGIndex(ch));
+                        }
+                        st.noteOn = false;
+                    } else if (isFM(ch)) {
+                        fmKeyOff(toFMIndex(ch));
+                        st.noteOn = false;
+                    }
+                }
                 st.eventIdx = st.events.size();  // 残りイベントを全スキップ
                 break;
             }
@@ -759,9 +784,12 @@ private:
                 st.ssgReleasing = false;
                 st.reverbActive = false;
                 // SSGソフトウェアエンベロープ: ATTACK開始
+                // Z80互換: SSSUBG→SOFEV7（音量計算のみ、エンベロープ進行なし）
+                // KEY_ON tickではSOFENV進行をスキップし、SOFEV7相当の計算のみ行う
                 if (isSSG(ch) && st.ssgSoftEnv) {
                     st.ssgEnvValue = st.ssgEnvAL;
                     st.ssgEnvPhase = 1;  // ATTACK
+                    st.ssgEnvKeyOnTick = true;  // このtickではSOFENV進行スキップ
                 }
                 break;
             case MmlEventType::NOTE_OFF:
