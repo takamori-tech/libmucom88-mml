@@ -209,6 +209,9 @@ public:
             m_engine->writeReg(0, 0x07, m_ssgMixer);
             // SSG ノイズ周期
             m_engine->writeReg(0, 0x06, 0x00);
+            // Timer制御: 通常モード（CSMモード解除）
+            // Z80 PLSET2: reg 0x27 = 0x3A（Timer-B有効、CSMなし）
+            m_engine->writeReg(0, 0x27, 0x3A);
 
             // FM音色を再適用
             for (int fi = 0; fi < MAX_FM_CHANNELS; fi++)
@@ -412,6 +415,28 @@ public:
                     }
                 }
 
+                // MUCOM88互換: FMリバーブ毎tick TL減衰（Z80 FS2互換）
+                // Z80 FMSUB0: wait>0かつKEYOFF_FLAG=1かつリバーブON → FS2
+                // FS2: TOTALV = (TOTALV + reverbValue) >> 1 → STV2(TL書き込み)
+                // IIRフィルター式に reverbValue に収束する
+                // Z80互換: チャンネルデータ終了後はFMSUB0が呼ばれないため、減衰停止
+                for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
+                    if (!isFM(ch)) continue;
+                    auto& cst = m_channels[ch];
+                    if (!cst.reverbActive) continue;
+                    // チャンネル終了後は減衰停止（Z80: データ終了後FMSUB0不呼び出し）
+                    if (cst.eventIdx >= cst.events.size()) {
+                        cst.reverbActive = false;
+                        continue;
+                    }
+                    // 毎tick減衰: TOTALV = (TOTALV + reverbValue) >> 1
+                    int newVol = (cst.reverbCurrentVol + cst.reverbValue) >> 1;
+                    if (newVol > 15) newVol = 15;
+                    if (newVol == cst.reverbCurrentVol) continue;  // 収束済み: 書き込み不要
+                    cst.reverbCurrentVol = newVol;
+                    fmSetVolume(toFMIndex(ch), cst.reverbCurrentVol);
+                }
+
                 // テンポ変更 → Timer-B再計算
                 recalcTimerB();
             }
@@ -468,6 +493,8 @@ public:
             st.noteOnCount  = 0;  // UI activityカウンタもリセット
             st.reverbActive = false;
             st.portaActive  = false;
+            st.csmEnabled   = false;
+            st.csmDetune[0] = st.csmDetune[1] = st.csmDetune[2] = st.csmDetune[3] = 0;
             // ピッチ関連
             st.detune       = 0;
             st.lfoPitchOffset = 0;
@@ -569,6 +596,12 @@ public:
                     // HW LFO設定はレジスタ書き込みのみ（復元はplay後の再生で行われる）
                     // ここではst側の状態変更がないのでbreak
                     break;
+                case MmlEventType::CSM_MODE:
+                    st.csmDetune[0] = ev.vibDelay; st.csmDetune[1] = ev.vibRate;
+                    st.csmDetune[2] = ev.vibDepth; st.csmDetune[3] = ev.vibCount;
+                    st.csmEnabled = !(st.csmDetune[0] == 0 && st.csmDetune[1] == 0 &&
+                                      st.csmDetune[2] == 0 && st.csmDetune[3] == 0);
+                    break;
                 case MmlEventType::REVERB_ENVELOPE:
                     st.reverbValue = ev.value; st.reverbEnabled = true; break;
                 case MmlEventType::REVERB_SWITCH:
@@ -659,10 +692,15 @@ private:
         bool     reverbEnabled  = false; // リバーブON/OFF（IX+33 bit5）
         bool     reverbQCutOnly = false; // リバーブモード: true=qカット部分のみ（IX+33 bit4）
         bool     reverbActive   = false; // KEY_OFF済み=リバーブ減衰中
+        int      reverbCurrentVol = 0;   // リバーブ減衰中の現在ボリューム（Z80 TOTALV互換、毎tick更新）
         // ループポイント（Lコマンド）
         size_t   loopEventIdx   = 0;   // ループ再開時のイベントインデックス
         uint32_t loopTick       = 0;   // ループ再開時のtick
         bool     hasLoopPoint   = false;
+        // CSMモード（Sコマンド、FM ch3 エフェクトモード）
+        // Z80 MDSET→TO_EFC/EXMODE: 毎tickで4オペレータ独立F-Number + 4回KEY ON
+        bool     csmEnabled     = false;
+        int      csmDetune[4]   = {0, 0, 0, 0};  // OP1-OP4 デチューンオフセット
     };
 
     IFmEngine*  m_engine;
@@ -694,6 +732,8 @@ private:
     // yコマンドやpコマンドで更新される。rhythmKeyOnで毎回書き込む。
     std::array<uint8_t, 6> m_rhythmIL = {0xDF,0xDF,0xDF,0xDF,0xDF,0xDF}; // L+R + level 31
     int         m_globalAtt  = 0;     // グローバル減衰（FM TL加算値、0=通常）
+    int         m_pcmVolMode = 0;     // PVMODE: 0=IX+6のみ使用, 1=IX+6+IX+7
+    int         m_pcmAddVol  = 0;     // ADPCM-B追加音量（PVMODE=1時のIX+7、V1→v設定）
 
     // ADPCM-B音楽チャンネル（Kトラック、ch10）
     // mucompcm.bin PCMADRテーブル: 8バイト/エントリ (startAddr, endAddr, reserved, param)
@@ -774,7 +814,12 @@ private:
                     }
                     // Z80: FMSUB5→FMSUB4→FMSUB7→KEYON
                     // KEYON後: リバーブON時のみ STVOL（music.asm line 745-746）
-                    doKeyOn(ch, ev.note, ev.velocity);
+                    if (ch == 2 && st.csmEnabled) {
+                        // CSMモード: EXMODE互換 — 4オペレータ独立F-Number + 4回KEY ON
+                        csmKeyOn(ch, ev.note, ev.velocity);
+                    } else {
+                        doKeyOn(ch, ev.note, ev.velocity);
+                    }
                     if (isFM(ch) && st.reverbEnabled) {
                         doSetVolume(ch, st.volume);
                     }
@@ -807,11 +852,12 @@ private:
                     }
                     if (!skipKeyOff) {
                         if (isFM(ch) && st.reverbEnabled) {
-                            // FM リバーブ: KEY_OFFの代わりに音量を下げる
-                            // Z80 FMSUB0/FS2: vol += reverbValue, vol >>= 1 → STV2
-                            int revVol = (st.volume + st.reverbValue) >> 1;
-                            revVol = std::clamp(revVol, 0, 15);
-                            fmSetVolume(toFMIndex(ch), revVol);
+                            // FM リバーブ: KEY_OFFの代わりに音量を漸減させる
+                            // Z80 FS2: TOTALV = (TOTALV + reverbValue) >> 1 → STV2
+                            // 初回の減衰を適用し、以降は毎tickで advance() 内で漸減
+                            st.reverbCurrentVol = (st.volume + st.reverbValue) >> 1;
+                            if (st.reverbCurrentVol > 15) st.reverbCurrentVol = 15;
+                            fmSetVolume(toFMIndex(ch), st.reverbCurrentVol);
                             st.reverbActive = true;
                             // Z80互換: KEYOFFフラグ(IX+31 bit6)セットのみ
                             // noteOnは変更しない（LFO/ピッチ更新を継続するため）
@@ -836,8 +882,19 @@ private:
                 m_globalTempo = ev.value;  // テンポは全チャンネル共有
                 break;
             case MmlEventType::VOLUME:
-                st.volume = ev.value;
-                doSetVolume(ch, ev.value);
+                if (isADPCMB(ch) && ev.note == 1) {
+                    // PVMODE=1: v値をIX+7(追加音量)に格納。IX+6(baseVol)は変更しない
+                    m_pcmVolMode = 1;
+                    m_pcmAddVol = ev.value;
+                    adpcmbSetVolume(st.volume);  // baseVol+addVolで再計算
+                } else {
+                    if (isADPCMB(ch) && ev.note == 0) {
+                        // PVMODE=0: v値をIX+6(baseVol)に格納。IX+7は変更しない
+                        m_pcmVolMode = 0;
+                    }
+                    st.volume = ev.value;
+                    doSetVolume(ch, ev.value);
+                }
                 break;
             case MmlEventType::PATCH:
                 doSetPatch(ch, ev.value);
@@ -885,9 +942,9 @@ private:
                     // Rm0(reverbQCutOnly=false): 休符でもリバーブ適用
                     // Rm1(reverbQCutOnly=true): 休符ではリバーブ適用しない→通常KEY_OFF
                     if (isFM(ch) && st.reverbEnabled && !st.reverbQCutOnly && st.noteOn) {
-                        int revVol = (st.volume + st.reverbValue) >> 1;
-                        revVol = std::clamp(revVol, 0, 15);
-                        fmSetVolume(toFMIndex(ch), revVol);
+                        st.reverbCurrentVol = (st.volume + st.reverbValue) >> 1;
+                        if (st.reverbCurrentVol > 15) st.reverbCurrentVol = 15;
+                        fmSetVolume(toFMIndex(ch), st.reverbCurrentVol);
                         st.reverbActive = true;
                         // noteOnは維持（LFO継続）
                     } else {
@@ -989,6 +1046,29 @@ private:
                     int panBits = panToReg(st.pan) & 0xC0;
                     m_engine->writeReg(port, 0xB4 + off,
                         (uint8_t)(panBits | ((ams & 0x03) << 4) | (pms & 0x07)));
+                }
+                break;
+            }
+            case MmlEventType::CSM_MODE: {
+                // FM ch3 CSMモード（Z80 MDSET→TO_EFC/EXMODE）
+                // S n1,n2,n3,n4: OP1-OP4のデチューンオフセット設定
+                // S0,0,0,0: 通常モード復帰（TO_NML）
+                st.csmDetune[0] = ev.vibDelay;  // OP1
+                st.csmDetune[1] = ev.vibRate;   // OP2
+                st.csmDetune[2] = ev.vibDepth;  // OP3
+                st.csmDetune[3] = ev.vibCount;  // OP4
+                bool allZero = (st.csmDetune[0] == 0 && st.csmDetune[1] == 0 &&
+                                st.csmDetune[2] == 0 && st.csmDetune[3] == 0);
+                if (allZero) {
+                    // TO_NML: 通常モード復帰（reg 0x27 = 0x3A）
+                    st.csmEnabled = false;
+                    if (m_engine)
+                        m_engine->writeReg(0, 0x27, 0x3A);
+                } else {
+                    // TO_EFC: エフェクトモード有効化（reg 0x27 = 0x7A）
+                    st.csmEnabled = true;
+                    if (m_engine)
+                        m_engine->writeReg(0, 0x27, 0x7A);
                 }
                 break;
             }
@@ -1247,6 +1327,59 @@ private:
             tp = std::clamp(tp, 1, 0xFFF);
             m_engine->writeReg(0, si * 2,     (uint8_t)(tp & 0xFF));
             m_engine->writeReg(0, si * 2 + 1, (uint8_t)((tp >> 8) & 0x0F));
+        }
+    }
+
+    // ── FM ch3 CSMモード KEY ON（Z80 EXMODE互換）──────────
+    // Z80 EXMODE: ノートイベント時にOP1-OP4の独立F-Numberを設定し、各々KEY ONする。
+    // OP1: 0xA6/0xA2（通常ch3レジスタ）
+    // OP2: 0xAC/0xA8, OP3: 0xAD/0xA9, OP4: 0xAE/0xAA（ch3特殊モードレジスタ）
+    void csmKeyOn(int ch, int noteNum, int /*velocity*/)
+    {
+        if (!m_engine) return;
+        auto& st = m_channels[ch];
+
+        // LFOランタイム状態をリセット（ノートオンごと）
+        st.lfoDelayCounter = st.lfoDelay;
+        st.lfoStepCounter  = 0;
+        st.lfoRateCounter  = 0;
+        st.lfoDirection    = 1;
+        st.lfoPitchOffset  = 0;
+        int pitchOffset = st.detune + st.lfoPitchOffset;
+        int block = 4;
+        uint16_t fnum = noteToFnum(noteNum, block);
+        int adjusted = (int)fnum + pitchOffset;
+        while (adjusted > 0x7FF && block < 7) { adjusted >>= 1; block++; }
+        while (adjusted < 0 && block > 0)     { adjusted <<= 1; block--; }
+        if (adjusted < 0) adjusted = 0;
+        if (adjusted > 0x7FF) adjusted = 0x7FF;
+        fnum = (uint16_t)adjusted;
+
+        // 基準F-Number（16bit: block<<11 | fnum）
+        int baseFnum = ((block & 0x07) << 11) | (fnum & 0x7FF);
+
+        // OP1-OP4のF-Numberレジスタアドレス（ch3特殊モード）
+        // Z80 EXMODE: FPORT=0xA4→(+IX+8=2)→0xA6 (OP1)
+        //             FPORT=0xAA→0xAC (OP2), 0xAB→0xAD (OP3), 0xAC→0xAE (OP4)
+        static const uint8_t msbRegs[4] = { 0xA6, 0xAC, 0xAD, 0xAE };
+        static const uint8_t lsbRegs[4] = { 0xA2, 0xA8, 0xA9, 0xAA };
+
+        // ch3 KEY ON: slot mask 0xF0 | ch3=2
+        static const uint8_t keyOnData = 0xF0 | 0x02;
+
+        for (int op = 0; op < 4; op++) {
+            int opFnum = baseFnum + st.csmDetune[op];
+            if (opFnum < 0) opFnum = 0;
+            int opBlock = (opFnum >> 11) & 0x07;
+            int opFn    = opFnum & 0x7FF;
+
+            // F-Number書き込み（MSB→LSBの順、Z80 FMSUB6互換）
+            m_engine->writeReg(0, msbRegs[op],
+                (uint8_t)(((opBlock & 0x07) << 3) | ((opFn >> 8) & 0x07)));
+            m_engine->writeReg(0, lsbRegs[op], (uint8_t)(opFn & 0xFF));
+
+            // KEY ON（Z80 FMSUB6→FMSUB7→KEYON: 毎オペレータF-Number書き込み後にKEY ON）
+            m_engine->writeReg(0, 0x28, keyOnData);
         }
     }
 
@@ -1575,9 +1708,13 @@ private:
 
         uint16_t deltaN = adpcmbNoteToDeltaN(noteNum);
         int vol = m_channels[10].volume;
-        // Z80 PLAY volume: TOTALV*4 + ch_volume, clamped to 250
+        // Z80 PLAY volume: TOTALV*4 + ch_volume [+ IX+7], clamped to 250
         // TOTALV はグローバル減衰（通常0）、ch_volumeはvコマンド値(0-255)
-        int finalVol = std::clamp(vol + m_globalAtt * 4, 0, 250);
+        // PVMODE=1時: IX+7(m_pcmAddVol)を加算
+        int finalVol = vol + m_globalAtt * 4;
+        if (m_pcmVolMode != 0) finalVol += m_pcmAddVol;
+        if (finalVol > 250) finalVol = 250;
+        if (finalVol < 0) finalVol = 0;
 
         // Z80 PLAY register sequence (port 1)
         m_engine->writeReg(1, 0x0B, 0x00);              // mute
@@ -1605,7 +1742,11 @@ private:
     void adpcmbSetVolume(int vol)
     {
         if (!m_engine) return;
-        int finalVol = std::clamp(vol + m_globalAtt * 4, 0, 250);
+        // Z80 PLAY: TOTALV*4 + ch_volume [+ IX+7 if PVMODE=1], clamp 250
+        int finalVol = vol + m_globalAtt * 4;
+        if (m_pcmVolMode != 0) finalVol += m_pcmAddVol;
+        if (finalVol > 250) finalVol = 250;
+        if (finalVol < 0) finalVol = 0;
         m_engine->writeReg(1, 0x0B, (uint8_t)finalVol);
     }
 

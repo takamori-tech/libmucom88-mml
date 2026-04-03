@@ -94,6 +94,7 @@ enum class MmlEventType {
     PORTAMENTO,      // ポルタメント（{} コマンド: note=開始音, value=終了音, duration=tick数）
     HARDWARE_LFO,    // ハードウェアLFO（H コマンド: vibDelay=freq, vibRate=PMS, vibDepth=AMS）
     LFO_PARAM,       // LFO個別パラメータ変更（MW/MC/ML/MD: value=パラメータ値, vibDelay=種別 0=W,1=C,2=L,3=D）
+    CSM_MODE,        // FM ch3 CSMモード（S コマンド: vibDelay-vibCount=OP1-OP4デチューン）
     END,        // チャンネル終端
 };
 
@@ -347,6 +348,7 @@ private:
         // エコーマクロ（\コマンド、MUCOM88 SETBEF互換）
         int      echoCount = 0;     // \=N: 繰り返し数（0=無効）
         int      echoVolRed = 0;    // \=N,M: 音量減衰値
+        int      pcmVolMode = 0;   // V0=baseVol(IX+6), V1=addVol(IX+7)
         std::vector<LoopFrame> loopStack;  // ネストループ用スタック
     };
 
@@ -714,23 +716,41 @@ private:
                 continue;
             }
 
-            // 大文字 V = PCM音量モード切替（V0=絶対, V1=相対）スキップ
+            // 大文字 V = PCM音量モード切替（V0=IX+6 baseVol, V1=IX+7 addVol）
+            // Z80 PCMVOL: PVMODE=0→IX+6に格納、PVMODE=1→IX+7に格納
             if (mml[pos] == 'V') {
                 pos++;
+                int mode = 0;
                 if (pos < mml.size() && (std::isdigit((unsigned char)mml[pos]) || mml[pos] == '-'))
-                    readInt(mml, pos, 0);
+                    mode = readInt(mml, pos, 0);
+                st.pcmVolMode = (mode != 0) ? 1 : 0;
                 continue;
             }
 
-            // 大文字 S = PCM制御コマンド スキップ（S n1,n2,n3,n4）
+            // 大文字 S = CSMモード / PCM制御コマンド（S n1,n2,n3,n4）
+            // ch==2（Track C = FM ch3）: CSM_MODEイベント生成（Z80 MDSET→TO_EFC/EXMODE）
+            // その他のチャンネル: スキップ（PCM制御等）
             if (mml[pos] == 'S' && pos + 1 < mml.size()
                 && (std::isdigit((unsigned char)mml[pos+1]) || mml[pos+1] == '-')) {
                 pos++;
-                readInt(mml, pos, 0);
-                while (pos < mml.size() && mml[pos] == ',') {
+                int params[4] = {0, 0, 0, 0};
+                params[0] = readInt(mml, pos, 0);
+                for (int pi = 1; pi < 4 && pos < mml.size() && mml[pos] == ','; pi++) {
                     pos++;
                     if (pos < mml.size() && (std::isdigit((unsigned char)mml[pos]) || mml[pos] == '-'))
-                        readInt(mml, pos, 0);
+                        params[pi] = readInt(mml, pos, 0);
+                }
+                if (ch == 2) {
+                    // FM ch3 CSMモード: S n1,n2,n3,n4 = OP1-OP4デチューンオフセット
+                    // S0,0,0,0 = 通常モード復帰（TO_NML: reg 0x27 = 0x3A）
+                    MmlEvent ev{};
+                    ev.type = MmlEventType::CSM_MODE;
+                    ev.tick = st.tick; ev.channel = ch;
+                    ev.vibDelay = params[0];  // OP1 detune
+                    ev.vibRate  = params[1];  // OP2 detune
+                    ev.vibDepth = params[2];  // OP3 detune
+                    ev.vibCount = params[3];  // OP4 detune
+                    events.push_back(ev);
                 }
                 continue;
             }
@@ -934,7 +954,10 @@ private:
                     }
                 } else if (ch == 10) {
                     // ADPCM-B: v 0-255（Wiki準拠）
+                    // Z80 PCMVOL: PVMODE=0→IX+6(baseVol), PVMODE=1→IX+7(addVol)
                     st.volume = std::clamp(readInt(mml, pos, 128), 0, 255);
+                    // pcmVolModeをVOLUMEイベントのnoteフィールドで通知
+                    // note=0: baseVol(IX+6), note=1: addVol(IX+7)
                 } else {
                     // FM/SSG: v 0-15
                     st.volume = std::clamp(readInt(mml, pos, 12), 0, 15);
@@ -942,6 +965,8 @@ private:
                 MmlEvent ev{};
                 ev.type = MmlEventType::VOLUME;
                 ev.tick = st.tick; ev.value = st.volume; ev.channel = ch;
+                // ADPCM-B: pcmVolMode をnoteフィールドで通知（0=baseVol, 1=addVol）
+                if (ch == 10) ev.note = st.pcmVolMode;
                 events.push_back(ev);
                 break;
             }
