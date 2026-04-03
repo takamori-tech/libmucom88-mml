@@ -358,6 +358,16 @@ public:
                     }
                 }
 
+                // Z80 PLSET2: 毎tick Timer制御レジスタ書き込み（INT3ハンドラ先頭）
+                // 通常モード: 0x3A、CSMエフェクトモード: 0x7A
+                // Timer-Bオーバーフローフラグリセット + Timer制御の安定化
+                if (m_engine) {
+                    bool anyCsm = false;
+                    for (int ch2 = 0; ch2 < MAX_MML_CHANNELS; ch2++)
+                        if (m_channels[ch2].csmEnabled) { anyCsm = true; break; }
+                    m_engine->writeReg(0, 0x27, anyCsm ? 0x7A : 0x3A);
+                }
+
                 // 全チャンネルを同じtickで同期処理（INT3割り込み相当）
                 for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                     auto& st = m_channels[ch];
@@ -1094,9 +1104,11 @@ private:
     void doKeyOn(int ch, int noteNum, int velocity)
     {
         // LFOランタイム状態をリセット（ノートオンごとに遅延から再開）
+        // Z80 LFORST+LFORST2: delay counter = delay, peak counter = peak/2(SRL A),
+        // waveform position = initial depth, rate counter = rate
         auto& st = m_channels[ch];
         st.lfoDelayCounter = st.lfoDelay;
-        st.lfoStepCounter  = 0;
+        st.lfoStepCounter  = st.lfoCount / 2;  // Z80 SETPEK: SRL A → peak/2
         st.lfoRateCounter  = 0;
         st.lfoDirection    = 1;
         st.lfoPitchOffset  = 0;
