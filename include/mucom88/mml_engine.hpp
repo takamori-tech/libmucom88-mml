@@ -140,14 +140,17 @@ public:
         // 曲全体ループ周期の計算（OpenMUCOM88 maxcount 互換）
         // Wiki: Lコマンド = "曲全体のループ位置指定"
         // イベント列を直接走査してLOOP_POINTを検出（processEvents実行前に必要）
-        // OpenMUCOM88はZ80コンパイラで全チャンネルを同一曲長にコンパイルする。
-        // 我々のパーサーではチャンネル間でendTickが異なることがあるため、
-        // Lコマンドを持つチャンネルの最小endTickを共通のループ終端とする。
+        // Z80コンパイラは全チャンネルを同一曲長（maxcount）にパディングする。
+        // 我々のパーサーではチャンネル間でendTickが異なるため:
+        //   commonEndTick  = max(endTick) — 最長チャンネルが曲全体長を決定（≈ maxcount）
+        //   commonLoopTick = min(loopTick) — 最も早いLポイントからループ区間開始
+        // min(endTick)を使うと短いチャンネルで曲が打ち切られ、loopTick > endTick で
+        // uint32_t underflow → 毎tick globalLoopRestart() が発火する（Issue #32）
         {
             m_commonEndTick = 0;
-            m_commonLoopTick = 0;
+            m_commonLoopTick = UINT32_MAX;
             bool anyLoop = false;
-            uint32_t minEnd = UINT32_MAX;
+            uint32_t maxEnd = 0;
             for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                 auto& st = m_channels[ch];
                 if (st.events.empty()) continue;
@@ -160,15 +163,18 @@ public:
                         break;
                     }
                 }
+                // 全非空チャンネルのendTickをmax計算に含める（Z80パディング互換）
+                uint32_t endTick = st.events.back().tick;
+                if (endTick > maxEnd) maxEnd = endTick;
                 if (!st.hasLoopPoint) continue;
                 anyLoop = true;
-                uint32_t endTick = st.events.back().tick;
-                if (endTick < minEnd) minEnd = endTick;
-                if (st.loopTick > m_commonLoopTick)
+                if (st.loopTick < m_commonLoopTick)
                     m_commonLoopTick = st.loopTick;
             }
-            if (anyLoop && minEnd != UINT32_MAX)
-                m_commonEndTick = minEnd;
+            if (anyLoop && maxEnd > 0)
+                m_commonEndTick = maxEnd;
+            if (m_commonLoopTick == UINT32_MAX)
+                m_commonLoopTick = 0;
             // 外部からループ終端tickが指定されている場合はそちらを優先
             // （パート分離比較時にOpenMUCOM88のMaxCountと合わせるため）
             if (m_overrideEndTick > 0)
@@ -451,14 +457,9 @@ public:
             if (st.hasLoopPoint) {
                 st.eventIdx = st.loopEventIdx;
             } else {
-                // Lコマンドがないチャンネル: commonLoopTick以降のイベントを探す
-                st.eventIdx = 0;
-                for (size_t i = 0; i < st.events.size(); i++) {
-                    if (st.events[i].tick >= m_commonLoopTick) {
-                        st.eventIdx = i;
-                        break;
-                    }
-                }
+                // Lコマンドがないチャンネル: ループせず沈黙を維持
+                // Z80プレイヤーではLなしトラックはループ時に再生されない
+                st.eventIdx = st.events.size();
             }
 
             // ランタイム状態リセット（全可変状態をデフォルト値に復元）
