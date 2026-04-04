@@ -1431,7 +1431,12 @@ private:
             // %N: クロック直接指定（付点・分割なし）
             ticks = directTicks;
             // ^延長・&タイは引き続き処理
-            while (pos < mml.size() && mml[pos] == '^') {
+            // MUCOM88はスペースを無視: `a ^ ^` = `a^^`（Issue #11: sq1_112）
+            while (true) {
+                size_t peek = pos;
+                while (peek < mml.size() && (mml[peek] == ' ' || mml[peek] == '\t')) peek++;
+                if (peek >= mml.size() || mml[peek] != '^') break;
+                pos = peek;
                 pos++;
                 if (pos < mml.size() && mml[pos] == '%') {
                     pos++;
@@ -1584,7 +1589,13 @@ private:
         // `^` 音長延長（MUCOM88: ^N で N分音符分延長、^単独はデフォルト音長(l値)分）
         // Z80互換: ^の後に数値がない場合はdefLen（lコマンドで設定）を使用
         // ノート自体の音長ではない（例: l4 e1^. = 128 + dotted_l4(48) = 176）
-        while (pos < mml.size() && mml[pos] == '^') {
+        // MUCOM88はスペースを無視: `a ^ ^` = `a^^`（Issue #11: sq1_112）
+        while (true) {
+            // ^の前のスペースをスキップ（先読みで^がある場合のみ消費）
+            size_t peek = pos;
+            while (peek < mml.size() && (mml[peek] == ' ' || mml[peek] == '\t')) peek++;
+            if (peek >= mml.size() || mml[peek] != '^') break;
+            pos = peek;  // ^が見つかったのでスペースを消費
             pos++;
             int elen = 0;
             if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
