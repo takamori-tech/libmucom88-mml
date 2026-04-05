@@ -147,13 +147,13 @@ inline FmPatch parseVoiceDatEntry(const uint8_t* voiceDat, size_t dataSize, int 
     // OPM判定は音色名領域（byte 26-31）のパターンで行う。
     // 現時点ではisOpm=falseのまま（将来のG2モード用に予約）。
 
-    // 音色名（byte 26-31, 6文字ASCII）
+    // 音色名（byte 26-31, 6バイト）
+    // MUCOM88ではShift_JIS半角カタカナ(0xA0-0xDF)等も使用されるためバイト列をそのまま保持
+    // 末尾の0x00と0x20を除去
     for (int j = 0; j < 6; j++) {
-        uint8_t c = rec[26 + j];
-        if (c >= 0x20 && c < 0x7F) p.name += (char)c;
+        p.name += (char)rec[26 + j];
     }
-    // 末尾スペース除去
-    while (!p.name.empty() && p.name.back() == ' ')
+    while (!p.name.empty() && (p.name.back() == ' ' || p.name.back() == '\0'))
         p.name.pop_back();
 
     p.valid = true;

@@ -364,6 +364,28 @@ private:
         return ::parseVoiceDatEntry(m_voiceDat.data(), m_voiceDat.size(), patchNo);
     }
 
+    // voice.dat から音色名で検索（@"name" コマンド用）
+    // MUCOM88 Z80コンパイラのSRCHPCM相当: name[6]フィールドをバイト列比較
+    // 戻り値: 見つかった場合は音色番号(0-255)、見つからない場合は-1
+    int findPatchByName(const std::string& name) const
+    {
+        if (m_voiceDat.size() < 32) return -1;
+        int maxPatch = (int)(m_voiceDat.size() / 32);
+
+        for (int i = 0; i < maxPatch; i++) {
+            const uint8_t* rec = &m_voiceDat[(size_t)i * 32];
+            // voice.dat byte 26-31: 音色名（6バイト、末尾0x00/0x20パディング）
+            std::string entryName;
+            for (int j = 0; j < 6; j++) {
+                entryName += (char)rec[26 + j];
+            }
+            while (!entryName.empty() && (entryName.back() == ' ' || entryName.back() == '\0'))
+                entryName.pop_back();
+            if (entryName == name) return i;
+        }
+        return -1;
+    }
+
     // ==========================================================================
     // ヘッダタグ処理
     // ==========================================================================
@@ -1005,11 +1027,22 @@ private:
                     while (pos < mml.size() && mml[pos] != ' ' && mml[pos] != '\n') pos++;
                     break;
                 }
-                // '@"name"' は文字列音色名（MUCOM88拡張、スキップ）
+                // '@"name"' は文字列音色名（MUCOM88拡張）
+                // voice.datのname[6]フィールドとバイト列比較して音色番号を解決
                 if (pos < mml.size() && mml[pos] == '"') {
                     pos++;
-                    while (pos < mml.size() && mml[pos] != '"') pos++;
+                    std::string voiceName;
+                    while (pos < mml.size() && mml[pos] != '"')
+                        voiceName += mml[pos++];
                     if (pos < mml.size()) pos++;  // 閉じ '"' をスキップ
+                    int pno = findPatchByName(voiceName);
+                    if (pno >= 0) {
+                        st.patch = pno;
+                        MmlEvent ev{};
+                        ev.type = MmlEventType::PATCH;
+                        ev.tick = st.tick; ev.value = pno; ev.channel = ch;
+                        events.push_back(ev);
+                    }
                     break;
                 }
                 st.patch = readInt(mml, pos, 0);
