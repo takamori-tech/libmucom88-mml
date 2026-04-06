@@ -348,7 +348,8 @@ private:
         // エコーマクロ（\コマンド、MUCOM88 SETBEF互換）
         int      echoCount = 0;     // \=N: 繰り返し数（0=無効）
         int      echoVolRed = 0;    // \=N,M: 音量減衰値
-        int      pcmVolMode = 0;   // V0=baseVol(IX+6), V1=addVol(IX+7)
+        int      pcmVolMode = 0;   // V0=baseVol(IX+6), V1=addVol(IX+7)（ADPCM-B用、現在未使用）
+        int      tvOffset   = 0;   // V N: Total Volume Offset（Z80 muc88.asm TV_OFS互換）
         std::vector<LoopFrame> loopStack;  // ネストループ用スタック
     };
 
@@ -738,14 +739,16 @@ private:
                 continue;
             }
 
-            // 大文字 V = PCM音量モード切替（V0=IX+6 baseVol, V1=IX+7 addVol）
-            // Z80 PCMVOL: PVMODE=0→IX+6に格納、PVMODE=1→IX+7に格納
+            // 大文字 V = Total Volume Offset（Z80コンパイラ TV_OFS互換）
+            // Z80 muc88.asm TOTALV: V Nでコンパイル時のボリュームオフセットを設定
+            // vコマンド値にTV_OFSを加算してバイトコードに格納する（ランタイムコマンドではない）
+            // SSG: compiled_vol = v + TV_OFS, FM: compiled_vol = v + TV_OFS + 4
             if (mml[pos] == 'V') {
                 pos++;
-                int mode = 0;
+                int ofs = 0;
                 if (pos < mml.size() && (std::isdigit((unsigned char)mml[pos]) || mml[pos] == '-'))
-                    mode = readInt(mml, pos, 0);
-                st.pcmVolMode = (mode != 0) ? 1 : 0;
+                    ofs = readInt(mml, pos, 0);
+                st.tvOffset = ofs;
                 continue;
             }
 
@@ -982,7 +985,10 @@ private:
                     // note=0: baseVol(IX+6), note=1: addVol(IX+7)
                 } else {
                     // FM/SSG: v 0-15
-                    st.volume = std::clamp(readInt(mml, pos, 12), 0, 15);
+                    // Z80コンパイラ互換: TV_OFS(Vコマンド)を加算してからクランプ
+                    // Z80 muc88.asm STV12(SSG): compiled_vol = TV_OFS + v
+                    // Z80 muc88.asm FM path:    compiled_vol = TV_OFS + v + 4（+4はfmVolTable側で吸収済み）
+                    st.volume = std::clamp(readInt(mml, pos, 12) + st.tvOffset, 0, 15);
                 }
                 MmlEvent ev{};
                 ev.type = MmlEventType::VOLUME;
