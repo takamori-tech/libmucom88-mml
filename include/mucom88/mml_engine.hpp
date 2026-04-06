@@ -1592,44 +1592,83 @@ private:
         }
     }
 
-    // Z80 SSGDAT テーブル（music.asm:2162）
-    // SSG @N プリセット: 各6バイト = AL, AR, DR, SL, SR, RR
+    // Z80 SSGDAT テーブル（music.asm:2162 + ssgdat.asm）
+    // SSG @N プリセット: E(AL,AR,DR,SL,SR,RR), P(ミキサー), M(LFO: delay,rate,depth,count)
+    // LFOパラメータはZ80 OTOSSG→LFOON経由で設定される
     static constexpr int SSGDAT_COUNT = 16;
-    static constexpr int SSGDAT[SSGDAT_COUNT][6] = {
-        {255,255,255,255,  0,255},  // @0: 持続（エンベロープなし相当）
-        {255,255,255,200,  0, 10},  // @1: 標準サステイン
-        {255,255,255,200,  1, 10},  // @2: サステインレート1
-        {255,255,255,190,  0, 10},  // @3
-        {255,255,255,190,  1, 10},  // @4
-        {255,255,255,170,  0, 10},  // @5
-        { 40, 70, 14,190,  0, 15},  // @6: アタック40
-        {120, 30,255,255,  0, 10},  // @7
-        {255,255,255,225,  8, 15},  // @8
-        {255,255,255,  1,255,255},  // @9: 最小サステイン
-        {255,255,255,200,  8,255},  // @10
-        {255,255,255,220, 20,  8},  // @11: ノコギリ風
-        {255,255,255,255,  0, 10},  // @12
-        {255,255,255,255,  0, 10},  // @13
-        {120, 80,255,255,  0,255},  // @14: パーカッション
-        {255,255,255,220,  0,255},  // @15: ノイズ/BOM
+    struct SsgPreset {
+        int env[6];     // AL, AR, DR, SL, SR, RR
+        int mixerP;     // P値: 1=トーン, 2=ノイズ, 3=トーン+ノイズ
+        bool hasLfo;    // LFOパラメータあり
+        int lfoDelay;   // M第1パラメータ: ノートオン後の遅延tick数
+        int lfoRate;    // M第2パラメータ: 何tickで1ステップ進むか
+        int lfoDepth;   // M第3パラメータ: ピッチ変化量（符号あり）
+        int lfoCount;   // M第4パラメータ: 反転までのステップ数（負=無限）
+    };
+    static constexpr SsgPreset SSGDAT[SSGDAT_COUNT] = {
+        {{255,255,255,255,  0,255}, 1, false, 0,0,0,0},       // @0: 持続
+        {{255,255,255,200,  0, 10}, 1, false, 0,0,0,0},       // @1: 標準サステイン
+        {{255,255,255,200,  1, 10}, 1, false, 0,0,0,0},       // @2: サステインレート1
+        {{255,255,255,190,  0, 10}, 1, true,  16,1,25,4},     // @3: LFO付き
+        {{255,255,255,190,  1, 10}, 1, true,  16,1,25,4},     // @4: LFO付き(SR=1)
+        {{255,255,255,170,  0, 10}, 1, false, 0,0,0,0},       // @5: 速いリリース
+        {{ 40, 70, 14,190,  0, 15}, 1, true,  16,1,24,5},     // @6: スローアタック+LFO
+        {{120, 30,255,255,  0, 10}, 1, true,  16,1,25,4},     // @7: ベル風+LFO
+        {{255,255,255,225,  8, 15}, 1, false, 0,0,0,0},       // @8: SR=8
+        {{255,255,255,  1,255,255}, 2, false, 0,0,0,0},       // @9: ノイズ
+        {{255,255,255,200,  8,255}, 2, false, 0,0,0,0},       // @10: ノイズ(SR=8)
+        {{255,255,255,220, 20,  8}, 1, true,  1,1,300,-1},    // @11: 減衰ビブラート
+        {{255,255,255,255,  0, 10}, 1, true,  1,1,-400,4},    // @12: ピッチダウン
+        {{255,255,255,255,  0, 10}, 1, true,  1,1,80,-1},     // @13: ゆるいビブラート
+        {{120, 80,255,255,  0,255}, 1, true,  1,1,-250,1},    // @14: 揺れ
+        {{255,255,255,220,  0,255}, 1, true,  1,1,3000,-1},   // @15: 激しいビブラート
     };
 
     // Z80 OTOSSG → OTOCAL → ENVPST: SSGDATプリセットをソフトウェアエンベロープに適用
+    // + LFO(M)パラメータ、ミキサーモード(P)も適用
     void ssgApplyPreset(int si, int presetNo)
     {
         int mmlCh = si + 3;
         int idx = presetNo & 0x0F;
         if (idx >= SSGDAT_COUNT) idx = 0;
         auto& st = m_channels[mmlCh];
+        const auto& preset = SSGDAT[idx];
+
+        // エンベロープ
         st.ssgSoftEnv = true;
-        st.ssgEnvAL = SSGDAT[idx][0];
-        st.ssgEnvAR = SSGDAT[idx][1];
-        st.ssgEnvDR = SSGDAT[idx][2];
-        st.ssgEnvSL = SSGDAT[idx][3];
-        st.ssgEnvSR = SSGDAT[idx][4];
-        st.ssgEnvRR = SSGDAT[idx][5];
+        st.ssgEnvAL = preset.env[0];
+        st.ssgEnvAR = preset.env[1];
+        st.ssgEnvDR = preset.env[2];
+        st.ssgEnvSL = preset.env[3];
+        st.ssgEnvSR = preset.env[4];
+        st.ssgEnvRR = preset.env[5];
         // Z80 ENVPST: OR 10010000B → bit7=softEnv ON, bit4=envMode ON
         st.ssgEnvMode = true;
+
+        // ミキサーモード(P): Z80 OTOSSG→NOISE
+        bool toneOn  = (preset.mixerP & 1) != 0;
+        bool noiseOn = (preset.mixerP & 2) != 0;
+        if (toneOn)  m_ssgMixer &= ~(1 << si);
+        else         m_ssgMixer |=  (1 << si);
+        if (noiseOn) m_ssgMixer &= ~(1 << (si+3));
+        else         m_ssgMixer |=  (1 << (si+3));
+        if (m_engine) m_engine->writeReg(0, 0x07, m_ssgMixer);
+
+        // LFO(M): Z80 OTOSSG→LFOON
+        if (preset.hasLfo) {
+            st.lfoEnabled  = true;
+            st.lfoDelay    = preset.lfoDelay;
+            st.lfoRate     = preset.lfoRate;
+            st.lfoDepth    = preset.lfoDepth;
+            st.lfoCount    = preset.lfoCount;
+            st.lfoDelayCounter = preset.lfoDelay;
+            st.lfoRateCounter  = 0;
+            st.lfoStepCounter  = 0;
+            st.lfoPitchOffset = 0;
+            st.lfoDirection   = 1;
+        } else {
+            st.lfoEnabled = false;
+        }
     }
 
     // =====================================================================
