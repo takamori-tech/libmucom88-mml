@@ -425,26 +425,23 @@ public:
                     }
                 }
 
-                // MUCOM88互換: FMリバーブ毎tick TL減衰（Z80 FS2互換）
-                // Z80 FMSUB0: wait>0かつKEYOFF_FLAG=1かつリバーブON → FS2
-                // FS2: TOTALV = (TOTALV + reverbValue) >> 1 → STV2(TL書き込み)
-                // IIRフィルター式に reverbValue に収束する
-                // Z80互換: チャンネルデータ終了後はFMSUB0が呼ばれないため、減衰停止
+                // MUCOM88互換: FMリバーブ毎tick TL書き込み（Z80 FS2互換）
+                // Z80 FMSUB0: wait<q かつ リバーブON → FS2
+                // FS2: C = ((IX+6) + (IX+17)) >> 1 → STV2（TOTALV加算なし）
+                // IX+6は変更されない→毎tick同じ値を書く（定数、IIR減衰ではない）
+                // Z80互換: チャンネルデータ終了後はFMSUB0が呼ばれないため停止
                 for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                     if (!isFM(ch)) continue;
                     auto& cst = m_channels[ch];
                     if (!cst.reverbActive) continue;
-                    // チャンネル終了後は減衰停止（Z80: データ終了後FMSUB0不呼び出し）
+                    // チャンネル終了後は停止（Z80: データ終了後FMSUB0不呼び出し）
                     if (cst.eventIdx >= cst.events.size()) {
                         cst.reverbActive = false;
                         continue;
                     }
-                    // 毎tick減衰: TOTALV = (TOTALV + reverbValue) >> 1
-                    int newVol = (cst.reverbCurrentVol + cst.reverbValue) >> 1;
-                    if (newVol > 15) newVol = 15;
-                    if (newVol == cst.reverbCurrentVol) continue;  // 収束済み: 書き込み不要
-                    cst.reverbCurrentVol = newVol;
-                    fmSetVolume(toFMIndex(ch), cst.reverbCurrentVol);
+                    // Z80 FS2: C = (IX+6 + IX+17) >> 1 → STV2(FMVDAT[C])
+                    // IX+6(volume)は不変→毎tick同じTL値を書く（定数、IIR減衰ではない）
+                    fmSetReverbVolume(toFMIndex(ch), cst.volume, cst.reverbValue);
                 }
 
                 // テンポ変更 → Timer-B再計算
@@ -872,12 +869,10 @@ private:
                     }
                     if (!skipKeyOff) {
                         if (isFM(ch) && st.reverbEnabled) {
-                            // FM リバーブ: KEY_OFFの代わりに音量を漸減させる
-                            // Z80 FS2: TOTALV = (TOTALV + reverbValue) >> 1 → STV2
-                            // 初回の減衰を適用し、以降は毎tickで advance() 内で漸減
-                            st.reverbCurrentVol = (st.volume + st.reverbValue) >> 1;
-                            if (st.reverbCurrentVol > 15) st.reverbCurrentVol = 15;
-                            fmSetVolume(toFMIndex(ch), st.reverbCurrentVol);
+                            // FM リバーブ: KEY_OFFの代わりにFS2で音量設定
+                            // Z80 FS2: C = (IX+6 + IX+17) >> 1 → STV2（TOTALV加算なし）
+                            // IX+6は変更されない→毎tick同じ値を書く（定数）
+                            fmSetReverbVolume(toFMIndex(ch), st.volume, st.reverbValue);
                             st.reverbActive = true;
                             // Z80互換: KEYOFFフラグ(IX+31 bit6)セットのみ
                             // noteOnは変更しない（LFO/ピッチ更新を継続するため）
@@ -962,9 +957,8 @@ private:
                     // Rm0(reverbQCutOnly=false): 休符でもリバーブ適用
                     // Rm1(reverbQCutOnly=true): 休符ではリバーブ適用しない→通常KEY_OFF
                     if (isFM(ch) && st.reverbEnabled && !st.reverbQCutOnly && st.noteOn) {
-                        st.reverbCurrentVol = (st.volume + st.reverbValue) >> 1;
-                        if (st.reverbCurrentVol > 15) st.reverbCurrentVol = 15;
-                        fmSetVolume(toFMIndex(ch), st.reverbCurrentVol);
+                        // Z80 FMSUB3: 休符時にリバーブON → FS2
+                        fmSetReverbVolume(toFMIndex(ch), st.volume, st.reverbValue);
                         st.reverbActive = true;
                         // noteOnは維持（LFO継続）
                     } else {
@@ -1466,44 +1460,59 @@ private:
         m_engine->writeReg(0, 0x28, (uint8_t)(0x00 | chKey));
     }
 
-    void fmSetVolume(int fi, int vol)
+    // MUCOM88 FMVDAT テーブル全20エントリ（Z80 music.asm:2700）
+    // STV1: index = TOTALV(初期値4) + vol → FMVDAT[index]
+    // FS2(リバーブ): index = (vol + R) >> 1 → STV2 → FMVDAT[index]（TOTALV加算なし）
+    static constexpr int FMVDAT[20] = {
+        0x36, 0x33, 0x30, 0x2D,  // FMVDAT[0-3]（STV1では通常使わない、FS2で使用）
+        0x2A, 0x28, 0x25, 0x22,  // FMVDAT[4-7]  = vol 0-3
+        0x20, 0x1D, 0x1A, 0x18,  // FMVDAT[8-11] = vol 4-7
+        0x15, 0x12, 0x10, 0x0D,  // FMVDAT[12-15] = vol 8-11
+        0x0A, 0x08, 0x05, 0x02   // FMVDAT[16-19] = vol 12-15
+    };
+
+    static constexpr int carrierOffsets[8][4] = {
+        {12, -1, -1, -1},  // AL0: op4
+        {12, -1, -1, -1},  // AL1: op4
+        {12, -1, -1, -1},  // AL2: op4
+        {12, -1, -1, -1},  // AL3: op4
+        { 8, 12, -1, -1},  // AL4: op2,op4
+        { 8,  4, 12, -1},  // AL5: op2,op3,op4
+        { 8,  4, 12, -1},  // AL6: op2,op3,op4
+        { 0,  8,  4, 12},  // AL7: 全op
+    };
+
+    // キャリアTLにFMVDATテーブル値を書き込む共通関数
+    void fmWriteCarrierTL(int fi, int tlBase)
     {
         if (!m_engine) return;
         int port = fmPort(fi);
         int off  = fmOffset(fi);
-
         auto it = m_patchMap.find(m_fmPatchNo[fi]);
         int al = (it != m_patchMap.end()) ? it->second.al : 4;
 
-        static const int carrierOffsets[8][4] = {
-            {12, -1, -1, -1},  // AL0: op4
-            {12, -1, -1, -1},  // AL1: op4
-            {12, -1, -1, -1},  // AL2: op4
-            {12, -1, -1, -1},  // AL3: op4
-            { 8, 12, -1, -1},  // AL4: op2,op4
-            { 8,  4, 12, -1},  // AL5: op2,op3,op4
-            { 8,  4, 12, -1},  // AL6: op2,op3,op4
-            { 0,  8,  4, 12},  // AL7: 全op
-        };
-
-        // MUCOM88 FMVDAT テーブル（+4 オフセット補正済み）
-        // Z80 music.asm:2700 の20エントリテーブルに対し、OpenMUCOM88は
-        // volume N → FMVDAT[N+4] でアクセスする（STV1: A = TOTALV + C, TOTALV初期値=4）。
-        // よって v0-15 → FMVDAT[4]-FMVDAT[19] を使用。
-        static const int fmVolTable[16] = {
-            0x2A, 0x28, 0x25, 0x22, 0x20, 0x1D, 0x1A, 0x18,
-            0x15, 0x12, 0x10, 0x0D, 0x0A, 0x08, 0x05, 0x02
-        };
-        int tlBase = fmVolTable[std::clamp(vol, 0, 15)];
-
-        // MUCOM88: キャリアTLにはFMVDAT値をそのまま書く（パッチTLとの加算なし）
-        // 非キャリアのTLはパッチロード時の値を保持（変更しない）
         for (int oi = 0; oi < 4; oi++) {
             int so = carrierOffsets[al & 7][oi];
             if (so < 0) break;
             int tl = std::clamp(tlBase + m_globalAtt, 0, 127);
             m_engine->writeReg(port, 0x40 + so + off, (uint8_t)tl);
         }
+    }
+
+    // MUCOM88 STV1経由: FMVDAT[TOTALV + vol]（通常の音量設定）
+    // TOTALV初期値=4 なので vol 0-15 → FMVDAT[4]-FMVDAT[19]
+    void fmSetVolume(int fi, int vol)
+    {
+        int idx = std::clamp(vol + 4, 0, 19);
+        fmWriteCarrierTL(fi, FMVDAT[idx]);
+    }
+
+    // MUCOM88 FS2→STV2経由: FMVDAT[(vol + R) >> 1]（リバーブ用、TOTALV加算なし）
+    // Z80 FS2: C = (IX+6 + IX+17) >> 1 → STV2 → FMVDAT[C]
+    void fmSetReverbVolume(int fi, int vol, int reverbValue)
+    {
+        int idx = std::clamp((vol + reverbValue) >> 1, 0, 19);
+        fmWriteCarrierTL(fi, FMVDAT[idx]);
     }
 
     // =====================================================================
