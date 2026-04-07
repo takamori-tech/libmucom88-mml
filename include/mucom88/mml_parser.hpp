@@ -641,7 +641,14 @@ private:
                             MmlEvent volDown{};
                             volDown.type = MmlEventType::VOLUME;
                             volDown.tick = st.tick;
-                            volDown.value = std::max(st.volume - st.echoVolRed, 0);
+                            // Z80 STBF3: 0xFB(-M) → VOLUPF → ADD A,(IX+6) — クランプなし
+                            // FM: IX+6は+4オフセット含みのため負値許容（Issue #57と同じ）
+                            // SSG: VOLUPS → RET NC で範囲外なら変更しない → 0クランプ
+                            if (isFMChannel(ch)) {
+                                volDown.value = st.volume - st.echoVolRed;  // FM: クランプなし
+                            } else {
+                                volDown.value = std::max(st.volume - st.echoVolRed, 0);
+                            }
                             volDown.channel = ch;
                             events.push_back(volDown);
 
