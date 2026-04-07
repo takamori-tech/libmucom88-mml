@@ -881,6 +881,23 @@ private:
                     }
                 }
                 break;
+            case MmlEventType::TIE_KEYOFF:
+                // Z80 FMSUB3互換: ^タイ境界でのKEY_OFF/FS2処理
+                // Rm1(reverbQCutOnly): FS3→実KEY_OFF（エンベロープRELEASE開始）
+                // Rm0(reverb有効, !Rm1): FS2→リバーブ音量設定（KEY_OFFなし）
+                if (st.noteOn && isFM(ch)) {
+                    if (st.reverbQCutOnly) {
+                        // Z80 FMSUB3: BIT 4,(IX+33)=1 → FS3 → CALL KEYOFF
+                        doKeyOff(ch);
+                        st.reverbActive = true;
+                        // noteOnは維持（Z80もKEY_OFF後にLFO/ピッチ更新は継続）
+                    } else {
+                        // Z80 FMSUB3: BIT 5,(IX+33)=1 → FS2 → リバーブ音量
+                        fmSetReverbVolume(toFMIndex(ch), st.volume, st.reverbValue);
+                        st.reverbActive = true;
+                    }
+                }
+                break;
             case MmlEventType::TEMPO:
                 m_globalTempo = ev.value;  // テンポは全チャンネル共有
                 break;

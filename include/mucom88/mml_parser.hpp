@@ -95,6 +95,7 @@ enum class MmlEventType {
     HARDWARE_LFO,    // ハードウェアLFO（H コマンド: vibDelay=freq, vibRate=PMS, vibDepth=AMS）
     LFO_PARAM,       // LFO個別パラメータ変更（MW/MC/ML/MD: value=パラメータ値, vibDelay=種別 0=W,1=C,2=L,3=D）
     CSM_MODE,        // FM ch3 CSMモード（S コマンド: vibDelay-vibCount=OP1-OP4デチューン）
+    TIE_KEYOFF,      // タイ境界KEY_OFF（Z80 FMSUB3互換: ^タイ接続点でKEY_OFF/FS2）
     END,        // チャンネル終端
 };
 
@@ -350,6 +351,8 @@ private:
         uint32_t lastFullTicks = 0; // Z80 BEFCO互換: 直前ノートのフル音長（staccato前）
         int      pcmVolMode = 0;   // V0=baseVol(IX+6), V1=addVol(IX+7)（ADPCM-B用、現在未使用）
         int      tvOffset   = 0;   // V N: Total Volume Offset（Z80 muc88.asm TV_OFS互換）
+        bool     reverbEnabled  = false; // リバーブON/OFF追跡（パーサー内、^タイ境界判定用）
+        bool     reverbQCutOnly = false; // Rm1追跡（パーサー内、^タイ境界判定用）
         std::vector<LoopFrame> loopStack;  // ネストループ用スタック
     };
 
@@ -721,12 +724,14 @@ private:
                         ev.type = MmlEventType::REVERB_SWITCH;
                         ev.tick = st.tick; ev.value = param; ev.channel = ch;
                         events.push_back(ev);
+                        st.reverbEnabled = (param != 0);
                     } else if (sub == "M") {
                         // Rm0/Rm1: リバーブモード
                         MmlEvent ev{};
                         ev.type = MmlEventType::REVERB_MODE;
                         ev.tick = st.tick; ev.value = param; ev.channel = ch;
                         events.push_back(ev);
+                        st.reverbQCutOnly = (param != 0);
                     }
                     // その他 (RG等) はスキップ
                 } else {
@@ -739,6 +744,7 @@ private:
                     ev.type = MmlEventType::REVERB_ENVELOPE;
                     ev.tick = st.tick; ev.value = rv; ev.channel = ch;
                     events.push_back(ev);
+                    st.reverbEnabled = true;  // Z80: REVERVE→SET 5,(IX+33)
                 }
                 continue;
             }
@@ -1503,6 +1509,10 @@ private:
         // `^` クロック延長（MUCOM88独自）と `&` タイを処理してtickを累積
         bool tieOut = false;
         uint32_t ticks;
+        // ^タイ境界収集（FMチャンネル+リバーブ有効時のみ）
+        // Z80 FMSUB3: ^タイ接続点でRm1→FS3(KEYOFF), Rm0→FS2(リバーブ音量)
+        bool collectTieBoundaries = isFMChannel(ch) && st.reverbEnabled;
+        std::vector<uint32_t> tieBoundaries;
         if (directTicks > 0) {
             // %N: クロック直接指定（付点・分割なし）
             ticks = directTicks;
@@ -1514,6 +1524,8 @@ private:
                 if (peek >= mml.size() || mml[peek] != '^') break;
                 pos = peek;
                 pos++;
+                if (collectTieBoundaries)
+                    tieBoundaries.push_back(ticks);  // ^境界位置（加算前）
                 if (pos < mml.size() && mml[pos] == '%') {
                     pos++;
                     ticks += readInt(mml, pos, 0);
@@ -1527,7 +1539,7 @@ private:
                     ticks += st.wholeTick / elen;
                 }
             }
-            // &タイ
+            // &タイ — Z80 TIEコマンド(KEY_OFFなし)のため境界収集不要
             while (pos < mml.size() && mml[pos] == '&') {
                 pos++;
                 while (pos < mml.size() && (mml[pos] == ' ' || mml[pos] == '\t')) pos++;
@@ -1548,7 +1560,8 @@ private:
                 }
             }
         } else {
-            ticks = calcTicks(len, dotCount, st, mml, pos, tieOut);
+            ticks = calcTicks(len, dotCount, st, mml, pos, tieOut,
+                              collectTieBoundaries ? &tieBoundaries : nullptr);
         }
 
         // ノート番号（MIDI準拠: C4=60）+ キートランスポーズ
@@ -1612,6 +1625,17 @@ private:
         on.channel  = ch;
         events.push_back(on);
 
+        // ^タイ境界TIE_KEYOFFイベント生成（Z80 FMSUB3互換）
+        // Z80: ^タイ接続点でRm1→FS3(KEYOFF), Rm0→FS2(リバーブ音量)
+        for (uint32_t boundary : tieBoundaries) {
+            MmlEvent tkev{};
+            tkev.type    = MmlEventType::TIE_KEYOFF;
+            tkev.tick    = st.tick + boundary;
+            tkev.note    = noteNum;
+            tkev.channel = ch;
+            events.push_back(tkev);
+        }
+
         // NOTE_OFF（タイ継続中は出さない — 次行で延長される）
         if (!tieOut) {
             MmlEvent off{};
@@ -1645,13 +1669,18 @@ private:
         return base;
     }
 
+    // FMチャンネル判定（MmlEngine::isFMと同一）
+    static bool isFMChannel(int ch) { return ch <= 2 || (ch >= 7 && ch <= 9); }
+
     // ==========================================================================
     // tick計算（付点・^ クロック延長・& タイを処理）
     // tieOut: trueが返るとタイが行末で切れた（次行の最初のノートを結合すべき）
+    // tieBoundaries: ^タイ境界のオフセット（ノート先頭からの相対tick）を収集
     // ==========================================================================
     uint32_t calcTicks(int len, int dotCount, const State& st,
                        const std::string& mml, size_t& pos,
-                       bool& tieOut)
+                       bool& tieOut,
+                       std::vector<uint32_t>* tieBoundaries = nullptr)
     {
         tieOut = false;
         if (len <= 0) len = 4;
@@ -1681,11 +1710,13 @@ private:
             else
                 elen = st.defLen;  // Z80互換: デフォルト音長(lコマンド値)
             if (elen <= 0) elen = 4;
+            if (tieBoundaries)
+                tieBoundaries->push_back(ticks);  // ^境界位置（加算前）
             uint32_t et = applyDots(wt / elen, mml, pos);
             ticks += et;
         }
 
-        // `&` タイ（従来形式）
+        // `&` タイ（従来形式）— &はZ80 TIEコマンド（KEY_OFFなし）のため境界収集不要
         while (pos < mml.size() && mml[pos] == '&') {
             pos++;
             // 空白スキップ（行末の & の後にスペースがある場合）
@@ -1715,7 +1746,7 @@ private:
                 tlen = st.defLen;
             uint32_t tt = applyDots(wt / tlen, mml, pos);
             ticks += tt;
-            // ^ もここで処理
+            // ^ もここで処理（^はZ80 tie bitでKEY_OFF境界になる）
             while (pos < mml.size() && mml[pos] == '^') {
                 pos++;
                 int elen2 = 0;
@@ -1724,6 +1755,8 @@ private:
                 else
                     elen2 = tlen;
                 if (elen2 <= 0) elen2 = 4;
+                if (tieBoundaries)
+                    tieBoundaries->push_back(ticks);  // ^境界位置（加算前）
                 uint32_t et2 = applyDots(wt / elen2, mml, pos);
                 ticks += et2;
             }
