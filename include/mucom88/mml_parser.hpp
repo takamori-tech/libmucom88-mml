@@ -1652,21 +1652,26 @@ private:
                 uint32_t segEnd   = segPoints[s + 1];
                 uint32_t segLen   = segEnd - segStart;
                 // &境界がこのセグメント内にあるか確認
-                // ある場合、自動分割は最初の&境界までのみ適用
-                uint32_t autoSplitEnd = segEnd;
+                // ある場合、自動分割を完全スキップ
+                // Z80では&境界でKEY_ON(FMSUB9)が即座に実行されるため、
+                // 自動分割KEY_OFFは1tick以内にKEY_ONで打ち消される。
+                // 我々のエンジンには&境界のKEY_ONがないため自動分割は害になる。
+                bool hasAmpInSegment = false;
                 for (uint32_t as : ampSegStarts) {
-                    if (as > segStart && as < segEnd) {
-                        autoSplitEnd = as;
+                    if (as > segStart && as <= segEnd) {
+                        hasAmpInSegment = true;
                         break;
                     }
                 }
-                // Z80: 127tick超のセグメントを127tickずつ分割
-                uint32_t remain = autoSplitEnd - segStart;
-                uint32_t p = segStart;
-                while (remain > 127) {
-                    p += 127;
-                    allBoundaries.push_back(p);
-                    remain -= 127;
+                // Z80: 127tick超のセグメントを127tickずつ分割（&なしの場合のみ）
+                if (!hasAmpInSegment) {
+                    uint32_t remain = segLen;
+                    uint32_t p = segStart;
+                    while (remain > 127) {
+                        p += 127;
+                        allBoundaries.push_back(p);
+                        remain -= 127;
+                    }
                 }
                 // ^境界は明示的KEY_OFF
                 if (s + 1 < segPoints.size() - 1)
