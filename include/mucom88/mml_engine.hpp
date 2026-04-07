@@ -148,7 +148,6 @@ public:
         // uint32_t underflow → 毎tick globalLoopRestart() が発火する（Issue #32）
         {
             m_commonEndTick = 0;
-            m_implicitLoop = false;
             m_commonLoopTick = UINT32_MAX;
             bool anyLoop = false;
             uint32_t maxEnd = 0;
@@ -172,14 +171,8 @@ public:
                 if (st.loopTick < m_commonLoopTick)
                     m_commonLoopTick = st.loopTick;
             }
-            if (anyLoop && maxEnd > 0) {
+            if (anyLoop && maxEnd > 0)
                 m_commonEndTick = maxEnd;
-            } else if (!anyLoop && maxEnd > 0) {
-                // L無し曲: Z80は全チャンネルがDATA TOP(先頭)からループ
-                // 暗黙のloop point = tick 0 として扱う
-                m_commonEndTick = maxEnd;
-                m_implicitLoop = true;
-            }
             if (m_commonLoopTick == UINT32_MAX)
                 m_commonLoopTick = 0;
             // 外部からループ終端tickが指定されている場合はそちらを優先
@@ -495,11 +488,9 @@ public:
             // eventIdxをループポイントに設定
             if (st.hasLoopPoint) {
                 st.eventIdx = st.loopEventIdx;
-            } else if (m_implicitLoop) {
-                // L無し曲: 全チャンネルが先頭からループ（Z80 DATA TOP互換）
-                st.eventIdx = 0;
             } else {
-                // L有り曲のL無しチャンネル: ループせず沈黙を維持
+                // Lコマンドがないチャンネル: ループせず沈黙を維持
+                // Z80プレイヤーではLなしトラックはループ時に再生されない
                 st.eventIdx = st.events.size();
             }
 
@@ -735,7 +726,6 @@ private:
     int         m_wholeTick         = 128;  // Cコマンド（デフォルトC128）
     // 曲全体ループ（OpenMUCOM88 maxcount 互換）
     uint32_t    m_commonEndTick     = 0;    // 全チャンネル共通のループ終端tick
-    bool        m_implicitLoop      = false; // L無し曲の暗黙ループ（全チャンネル先頭から）
     uint32_t    m_overrideEndTick  = 0;    // 外部から指定されたループ終端tick（0=未指定）
     uint32_t    m_commonLoopTick    = 0;    // 全チャンネル共通のLコマンドtick
     uint32_t    m_loopTickOffset    = 0;    // ループ巻き戻しの累積tickオフセット
