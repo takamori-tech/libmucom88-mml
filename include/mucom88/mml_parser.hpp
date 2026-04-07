@@ -650,6 +650,7 @@ private:
                                 volDown.value = std::max(st.volume - st.echoVolRed, 0);
                             }
                             volDown.channel = ch;
+                            volDown.note = 3;  // エコー音量マーカー（ブラケットループvolDelta補正対象、vコマンド検出除外）
                             events.push_back(volDown);
 
                             // ノート複製（同じ音高、フル音長で発音）
@@ -674,6 +675,7 @@ private:
                             volUp.tick = st.tick;
                             volUp.value = st.volume;
                             volUp.channel = ch;
+                            volUp.note = 3;  // エコー音量マーカー
                             events.push_back(volUp);
                             break;
                         }
@@ -1157,15 +1159,14 @@ private:
                     int volDelta = st.volume - lf.volumeAtStart; // 1反復あたりの音量変化
                     int maxVol = (ch == 10) ? 255 : (ch == 6) ? 63 : 15;
 
-                    // ループ本体に絶対音量設定(vコマンド, note!=2)がある場合はvolDelta=0
+                    // ループ本体に絶対音量設定(vコマンド, note==0)がある場合はvolDelta=0
                     // vコマンドは毎回ボリュームをリセットするため、(/)の累積補正は不要
                     // 例: [v11(2bb)4]3 → v11が毎回リセット、各イテレーション同一
-                    // ループ本体に絶対音量設定(vコマンド, note!=2)がある場合はvolDelta=0
-                    // vコマンドは毎回ボリュームをリセットするため、(/)の累積補正は不要
-                    // 例: [v11(2bb)4]3 → v11が毎回リセット、各イテレーション同一
+                    // note==2: (/)コマンド、note==3: エコー音量 → どちらも補正対象（volDelta有効）
+                    // note==0: vコマンド（絶対設定）→ volDelta=0
                     if (volDelta != 0) {
                         for (size_t ei = lf.eventStart; ei < events.size(); ei++) {
-                            if (events[ei].type == MmlEventType::VOLUME && events[ei].note != 2) {
+                            if (events[ei].type == MmlEventType::VOLUME && events[ei].note == 0) {
                                 volDelta = 0;
                                 break;
                             }
@@ -1186,9 +1187,10 @@ private:
                             // tick をベースからのオフセットに再計算
                             ev.tick = (loopBody[ei].tick - lf.startTick) + (lf.startTick + rep * bodyTicks);
                             // VOLUMEイベント: (/)による累積変化を反映
-                            // note==2: 相対音量変更（(/)コマンド）のみ補正対象
-                            // note==0: 絶対音量設定（vコマンド）は累積補正しない
-                            if (ev.type == MmlEventType::VOLUME && volDelta != 0 && ev.note == 2) {
+                            // note==2: 相対音量変更（(/)コマンド）— 補正対象
+                            // note==3: エコー音量（\コマンド）— 補正対象
+                            // note==0: 絶対音量設定（vコマンド）— 累積補正しない
+                            if (ev.type == MmlEventType::VOLUME && volDelta != 0 && (ev.note == 2 || ev.note == 3)) {
                                 // Z80 VOLUPF: FM はクランプなし（IX+6に+4含むため負値OK）
                                 if (isFMChannel(ch)) {
                                     ev.value = ev.value + rep * volDelta;  // クランプなし
