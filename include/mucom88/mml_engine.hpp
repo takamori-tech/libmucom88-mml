@@ -1797,10 +1797,12 @@ private:
 
     void adpcmbKeyOn(int noteNum)
     {
-        if (!m_engine || !m_pcmLoaded) return;
+        if (!m_engine) return;
+        // PCMデータ未ロードでもレジスタ書き込みは実行（Z80互換）
         int idx = m_pcmCurrentNum - 1;  // Z80: DEC A (1-based → 0-based)
         if (idx < 0 || idx >= m_pcmVoiceCount) idx = 0;
-        auto& pcm = m_pcmTable[idx];
+        PcmVoiceEntry defaultPcm{};
+        auto& pcm = m_pcmLoaded ? m_pcmTable[idx] : defaultPcm;
 
         uint16_t deltaN = adpcmbNoteToDeltaN(noteNum);
         int vol = m_channels[10].volume;
