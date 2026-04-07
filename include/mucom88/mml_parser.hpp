@@ -1513,6 +1513,7 @@ private:
         // Z80 FMSUB3: ^タイ接続点でRm1→FS3(KEYOFF), Rm0→FS2(リバーブ音量)
         bool collectTieBoundaries = isFMChannel(ch) && st.reverbEnabled;
         std::vector<uint32_t> tieBoundaries;
+        std::vector<uint32_t> ampSegStarts;  // &セグメント開始位置（自動分割境界計算用）
         if (directTicks > 0) {
             // %N: クロック直接指定（付点・分割なし）
             ticks = directTicks;
@@ -1539,7 +1540,8 @@ private:
                     ticks += st.wholeTick / elen;
                 }
             }
-            // &タイ — Z80 TIEコマンド(KEY_OFFなし)のため境界収集不要
+            // &タイ — Z80 TIEコマンド(KEY_OFFなし)
+            // ただし各&セグメント内で独立にZ80自動分割が行われるため、セグメント開始を記録
             while (pos < mml.size() && mml[pos] == '&') {
                 pos++;
                 while (pos < mml.size() && (mml[pos] == ' ' || mml[pos] == '\t')) pos++;
@@ -1548,6 +1550,8 @@ private:
                 if (!(nc >= 'a' && nc <= 'g')) { tieOut = true; break; }
                 pos++;
                 if (pos < mml.size() && (mml[pos]=='+' || mml[pos]=='#' || mml[pos]=='-')) pos++;
+                if (collectTieBoundaries)
+                    ampSegStarts.push_back(ticks);  // &セグメント開始位置
                 int tlen = 0;
                 if (pos < mml.size() && mml[pos] == '%') {
                     pos++;
@@ -1561,7 +1565,8 @@ private:
             }
         } else {
             ticks = calcTicks(len, dotCount, st, mml, pos, tieOut,
-                              collectTieBoundaries ? &tieBoundaries : nullptr);
+                              collectTieBoundaries ? &tieBoundaries : nullptr,
+                              collectTieBoundaries ? &ampSegStarts : nullptr);
         }
 
         // ノート番号（MIDI準拠: C4=60）+ キートランスポーズ
@@ -1626,16 +1631,24 @@ private:
         events.push_back(on);
 
         // ^タイ境界 + Z80自動分割境界のTIE_KEYOFFイベント生成（Z80 FMSUB3互換）
-        // Z80コンパイラは7bit長制限（max 127 ticks/bytecode）で自動分割し、
+        // Z80コンパイラは7bit長制限（max 127 ticks/bytecode entry）で自動分割し、
         // 各分割点にtie bitを設定。FMSUB3でRm1→FS3(KEYOFF), Rm0→FS2(リバーブ音量)
+        // 重要: &タイはZ80 TIEコマンド（KEY_OFFなし）で接続されるが、
+        //        各&セグメント内では独立にZ80自動分割が行われる。
         if (collectTieBoundaries) {
-            // 明示的^境界に加え、各セグメント内の127tick超を自動分割
-            std::vector<uint32_t> allBoundaries;
-            // セグメント境界: [0, b1, b2, ..., ticks]
+            // セグメント分割ポイント: ^境界 + &境界（自動分割計算用）
+            // ^境界: KEY_OFFあり（FMSUB3パス）
+            // &境界: KEY_OFFなし（TIEコマンドパス）、自動分割の区切りのみ
             std::vector<uint32_t> segPoints;
             segPoints.push_back(0);
             for (uint32_t b : tieBoundaries) segPoints.push_back(b);
+            for (uint32_t b : ampSegStarts)  segPoints.push_back(b);
             segPoints.push_back(ticks);
+            std::sort(segPoints.begin(), segPoints.end());
+            segPoints.erase(std::unique(segPoints.begin(), segPoints.end()),
+                            segPoints.end());
+            // 各セグメント内の127tick超を自動分割
+            std::vector<uint32_t> allBoundaries;
             for (size_t s = 0; s + 1 < segPoints.size(); s++) {
                 uint32_t segStart = segPoints[s];
                 uint32_t segEnd   = segPoints[s + 1];
@@ -1647,9 +1660,16 @@ private:
                     allBoundaries.push_back(p);
                     segLen -= 127;
                 }
-                // 明示的^境界（最終セグメント端は除く）
-                if (s + 1 < segPoints.size() - 1)
-                    allBoundaries.push_back(segEnd);
+                // ^境界は明示的KEY_OFF（&境界は除く）
+                if (s + 1 < segPoints.size() - 1) {
+                    // tieBoundariesに含まれていれば^境界（KEY_OFFあり）
+                    for (uint32_t tb : tieBoundaries) {
+                        if (tb == segEnd) {
+                            allBoundaries.push_back(segEnd);
+                            break;
+                        }
+                    }
+                }
             }
             // 重複除去・ソート
             std::sort(allBoundaries.begin(), allBoundaries.end());
@@ -1705,11 +1725,13 @@ private:
     // tick計算（付点・^ クロック延長・& タイを処理）
     // tieOut: trueが返るとタイが行末で切れた（次行の最初のノートを結合すべき）
     // tieBoundaries: ^タイ境界のオフセット（ノート先頭からの相対tick）を収集
+    // ampSegStarts: &タイのセグメント開始オフセット（自動分割の境界計算用、KEY_OFFは不要）
     // ==========================================================================
     uint32_t calcTicks(int len, int dotCount, const State& st,
                        const std::string& mml, size_t& pos,
                        bool& tieOut,
-                       std::vector<uint32_t>* tieBoundaries = nullptr)
+                       std::vector<uint32_t>* tieBoundaries = nullptr,
+                       std::vector<uint32_t>* ampSegStarts = nullptr)
     {
         tieOut = false;
         if (len <= 0) len = 4;
@@ -1745,7 +1767,8 @@ private:
             ticks += et;
         }
 
-        // `&` タイ（従来形式）— &はZ80 TIEコマンド（KEY_OFFなし）のため境界収集不要
+        // `&` タイ（従来形式）— &はZ80 TIEコマンド（KEY_OFFなし）
+        // ただし各&セグメント内で独立にZ80自動分割が行われるため、セグメント開始位置を記録
         while (pos < mml.size() && mml[pos] == '&') {
             pos++;
             // 空白スキップ（行末の & の後にスペースがある場合）
@@ -1773,6 +1796,9 @@ private:
                 tlen = readInt(mml, pos, st.defLen);
             else
                 tlen = st.defLen;
+            // &セグメント開始位置を記録（Z80自動分割はセグメント内で独立に行われる）
+            if (ampSegStarts)
+                ampSegStarts->push_back(ticks);
             uint32_t tt = applyDots(wt / tlen, mml, pos);
             ticks += tt;
             // ^ もここで処理（^はZ80 tie bitでKEY_OFF境界になる）
