@@ -1144,6 +1144,21 @@ private:
                     int volDelta = st.volume - lf.volumeAtStart; // 1反復あたりの音量変化
                     int maxVol = (ch == 10) ? 255 : (ch == 6) ? 63 : 15;
 
+                    // ループ本体に絶対音量設定(vコマンド, note!=2)がある場合はvolDelta=0
+                    // vコマンドは毎回ボリュームをリセットするため、(/)の累積補正は不要
+                    // 例: [v11(2bb)4]3 → v11が毎回リセット、各イテレーション同一
+                    // ループ本体に絶対音量設定(vコマンド, note!=2)がある場合はvolDelta=0
+                    // vコマンドは毎回ボリュームをリセットするため、(/)の累積補正は不要
+                    // 例: [v11(2bb)4]3 → v11が毎回リセット、各イテレーション同一
+                    if (volDelta != 0) {
+                        for (size_t ei = lf.eventStart; ei < events.size(); ei++) {
+                            if (events[ei].type == MmlEventType::VOLUME && events[ei].note != 2) {
+                                volDelta = 0;
+                                break;
+                            }
+                        }
+                    }
+
                     // ブレーク情報
                     bool hasBreak = (lf.breakPos != std::string::npos);
                     size_t breakRelIdx = hasBreak ? (lf.breakEvIdx - lf.eventStart) : loopBody.size();
@@ -1158,7 +1173,9 @@ private:
                             // tick をベースからのオフセットに再計算
                             ev.tick = (loopBody[ei].tick - lf.startTick) + (lf.startTick + rep * bodyTicks);
                             // VOLUMEイベント: (/)による累積変化を反映
-                            if (ev.type == MmlEventType::VOLUME && volDelta != 0) {
+                            // note==2: 相対音量変更（(/)コマンド）のみ補正対象
+                            // note==0: 絶対音量設定（vコマンド）は累積補正しない
+                            if (ev.type == MmlEventType::VOLUME && volDelta != 0 && ev.note == 2) {
                                 ev.value = std::clamp(ev.value + rep * volDelta, 0, maxVol);
                             }
                             events.push_back(ev);
@@ -1187,6 +1204,7 @@ private:
                 MmlEvent ev{};
                 ev.type = MmlEventType::VOLUME;
                 ev.tick = st.tick; ev.value = st.volume; ev.channel = ch;
+                ev.note = 2;  // 相対音量変更マーカー（ブラケットループ展開時のvolDelta補正対象）
                 events.push_back(ev);
                 break;
             }
@@ -1200,6 +1218,7 @@ private:
                 MmlEvent ev{};
                 ev.type = MmlEventType::VOLUME;
                 ev.tick = st.tick; ev.value = st.volume; ev.channel = ch;
+                ev.note = 2;  // 相対音量変更マーカー（ブラケットループ展開時のvolDelta補正対象）
                 events.push_back(ev);
                 break;
             }
