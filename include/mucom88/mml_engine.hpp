@@ -1507,11 +1507,12 @@ private:
         fmWriteCarrierTL(fi, FMVDAT[idx]);
     }
 
-    // MUCOM88 FS2→STV2経由: FMVDAT[(vol + R) >> 1]（リバーブ用、TOTALV加算なし）
-    // Z80 FS2: C = (IX+6 + IX+17) >> 1 → STV2 → FMVDAT[C]
+    // MUCOM88 FS2→STV2経由: FMVDAT[(IX+6 + IX+17) >> 1]（リバーブ用）
+    // Z80 IX+6にはコンパイラSETVOLが+4を加算済み（FM用: user_vol + TV_OFS + 4）
+    // MmlEngineのvolは+4を含まないため、ここで加算する
     void fmSetReverbVolume(int fi, int vol, int reverbValue)
     {
-        int idx = std::clamp((vol + reverbValue) >> 1, 0, 19);
+        int idx = std::clamp((vol + 4 + reverbValue) >> 1, 0, 19);
         fmWriteCarrierTL(fi, FMVDAT[idx]);
     }
 
@@ -1778,9 +1779,9 @@ private:
 
         uint16_t deltaN = adpcmbNoteToDeltaN(noteNum);
         int vol = m_channels[10].volume;
-        // Z80 PLAY volume: TOTALV*4 + ch_volume [+ IX+7], clamped to 250
-        // TOTALV はグローバル減衰（通常0）、ch_volumeはvコマンド値(0-255)
-        // PVMODE=1時: IX+7(m_pcmAddVol)を加算
+        // Z80 PLAY volume: TOTALV*4 + IX+6 [+ IX+7], clamp 250
+        // Z80コンパイラSTV4→STV1: ADPCM-BはIX+6 = user_vol（+4なし、TV_OFSなし）
+        // PLAYルーチン: TOTALV*4 + IX+6 [+ IX+7(PVMODE=1時)]
         int finalVol = vol + m_globalAtt * 4;
         if (m_pcmVolMode != 0) finalVol += m_pcmAddVol;
         if (finalVol > 250) finalVol = 250;
@@ -1812,7 +1813,8 @@ private:
     void adpcmbSetVolume(int vol)
     {
         if (!m_engine) return;
-        // Z80 PLAY: TOTALV*4 + ch_volume [+ IX+7 if PVMODE=1], clamp 250
+        // Z80 PLAY: TOTALV*4 + IX+6 [+ IX+7], clamp 250
+        // Z80コンパイラSTV4→STV1: ADPCM-BはIX+6 = user_vol（+4なし、TV_OFSなし）
         int finalVol = vol + m_globalAtt * 4;
         if (m_pcmVolMode != 0) finalVol += m_pcmAddVol;
         if (finalVol > 250) finalVol = 250;
