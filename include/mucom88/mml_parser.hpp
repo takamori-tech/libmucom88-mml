@@ -1182,7 +1182,12 @@ private:
                             // note==2: 相対音量変更（(/)コマンド）のみ補正対象
                             // note==0: 絶対音量設定（vコマンド）は累積補正しない
                             if (ev.type == MmlEventType::VOLUME && volDelta != 0 && ev.note == 2) {
-                                ev.value = std::clamp(ev.value + rep * volDelta, 0, maxVol);
+                                // Z80 VOLUPF: FM はクランプなし（IX+6に+4含むため負値OK）
+                                if (isFMChannel(ch)) {
+                                    ev.value = ev.value + rep * volDelta;  // クランプなし
+                                } else {
+                                    ev.value = std::clamp(ev.value + rep * volDelta, 0, maxVol);
+                                }
                             }
                             events.push_back(ev);
                         }
@@ -1193,7 +1198,12 @@ private:
                     }
                     // パーサーのボリューム状態を最終反復の値に更新
                     if (volDelta != 0) {
-                        st.volume = std::clamp(st.volume + (count - 1) * volDelta, 0, maxVol);
+                        // Z80 VOLUPF: FMはクランプなし（負値許容）
+                        if (isFMChannel(ch)) {
+                            st.volume = st.volume + (count - 1) * volDelta;
+                        } else {
+                            st.volume = std::clamp(st.volume + (count - 1) * volDelta, 0, maxVol);
+                        }
                     }
                 }
                 break;
@@ -1206,7 +1216,14 @@ private:
                 int delta = 1;
                 if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
                     delta = readInt(mml, pos, 1);
-                st.volume = std::max(st.volume - delta, 0);
+                // Z80 VOLUPF: ADD A,(IX+6) — クランプなし
+                // FM: IX+6は+4オフセット含みのため、ユーザーvol=-2でもIX+6=2で有効
+                // SSG VOLUPS: 結果が0未満または>=16なら変更を適用しない（RET NC）
+                if (isFMChannel(ch)) {
+                    st.volume -= delta;  // FM: クランプなし（Z80互換）
+                } else {
+                    st.volume = std::max(st.volume - delta, 0);
+                }
                 MmlEvent ev{};
                 ev.type = MmlEventType::VOLUME;
                 ev.tick = st.tick; ev.value = st.volume; ev.channel = ch;
