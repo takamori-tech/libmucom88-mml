@@ -798,27 +798,15 @@ private:
             switch (ev.type) {
             case MmlEventType::NOTE_ON:
                 // Z80 FMSUB5→FMSUB4 タイ判定（music.asm line 529-557）:
-                // KEYOFF_FLAG=0（タイ時: 0xFDカウントオーバーでRES 6）:
-                //   line 531: CALL NZ,KEYOFF → スキップ（KEY_OFFなし）
-                //   line 550-555: BEFORE_CODE == 新キーコード → SCF; RET（KEY_ONもスキップ）
-                //   line 550-555: BEFORE_CODE != 新キーコード → FMSUB9（KEY_ONのみ）
-                // KEYOFF_FLAG=1（通常: FMSUB1で毎回SET 6）:
-                //   line 531: CALL NZ,KEYOFF → KEY_OFF実行
-                //   line 551: JR NZ,FMSUB9 → 常にKEY_ON
+                // FMSUB1は毎回SET 6,(IX+31)でKEYOFF_FLAG=1を設定する。
+                // KEYOFF_FLAG=1の場合:
+                //   FMSUB5: CALL NZ,KEYOFF → KEY_OFF実行（常に）
+                //   FMSUB4: JR NZ,FMSUB9 → KEY_ON実行（常に）
+                // KEYOFF_FLAG=0は0xFDカウントオーバー後のみ（通常到達しない）。
                 //
-                // noteOn=true かつ reverbActive=false → タイ（KEYOFF_FLAG=0相当）
-                if (st.noteOn && !st.reverbActive && isFM(ch)) {
-                    if (st.currentNote == ev.note) {
-                        // Z80 FMSUB4: 同キーコード → KEY_OFF/KEY_ON両方スキップ
-                        break;
-                    }
-                    // Z80 FMSUB4→FMSUB9: 異キーコード → KEY_OFFなしでKEY_ON
-                    // （エンベロープを途切れさせないピッチ変更）
-                    doKeyOn(ch, ev.note, ev.velocity);
-                    if (st.reverbEnabled) {
-                        doSetVolume(ch, st.volume);
-                    }
-                } else if (st.noteOn && isSSG(ch)) {
+                // したがってFMチャンネルでは、NOTE_ON時に必ずKEY_OFF→KEY_ONを行う。
+                // SSGはTIEフラグON時にキーオフせず周波数だけ変更（SSSUB6互換）。
+                if (st.noteOn && isSSG(ch)) {
                     // SSG: key-offせず周波数と音量を更新するだけ
                     // Z80 SSSUB6: TIEフラグON時はキーオフせずに周波数だけ変更
                     doKeyOn(ch, ev.note, ev.velocity);
