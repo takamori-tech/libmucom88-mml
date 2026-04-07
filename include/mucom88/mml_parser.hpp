@@ -1633,43 +1633,44 @@ private:
         // ^タイ境界 + Z80自動分割境界のTIE_KEYOFFイベント生成（Z80 FMSUB3互換）
         // Z80コンパイラは7bit長制限（max 127 ticks/bytecode entry）で自動分割し、
         // 各分割点にtie bitを設定。FMSUB3でRm1→FS3(KEYOFF), Rm0→FS2(リバーブ音量)
-        // 重要: &タイはZ80 TIEコマンド（KEY_OFFなし）で接続されるが、
-        //        各&セグメント内では独立にZ80自動分割が行われる。
+        //
+        // 自動分割は^セグメント内でのみ適用。&セグメント内の自動分割は対象外:
+        // Z80では&境界でKEY_ON(FMSUB9)が即座に実行されるため、
+        // 直前の自動分割KEY_OFFは1tick以内にKEY_ONで打ち消される。
+        // 我々のエンジンには&境界のKEY_ONがないため、自動分割KEY_OFFを
+        // 出すとリリース状態が継続し退行する。
         if (collectTieBoundaries) {
-            // セグメント分割ポイント: ^境界 + &境界（自動分割計算用）
-            // ^境界: KEY_OFFあり（FMSUB3パス）
-            // &境界: KEY_OFFなし（TIEコマンドパス）、自動分割の区切りのみ
+            // ^境界のみでセグメント分割（&境界は自動分割の区切りに使わない）
             std::vector<uint32_t> segPoints;
             segPoints.push_back(0);
             for (uint32_t b : tieBoundaries) segPoints.push_back(b);
-            for (uint32_t b : ampSegStarts)  segPoints.push_back(b);
             segPoints.push_back(ticks);
-            std::sort(segPoints.begin(), segPoints.end());
-            segPoints.erase(std::unique(segPoints.begin(), segPoints.end()),
-                            segPoints.end());
             // 各セグメント内の127tick超を自動分割
             std::vector<uint32_t> allBoundaries;
             for (size_t s = 0; s + 1 < segPoints.size(); s++) {
                 uint32_t segStart = segPoints[s];
                 uint32_t segEnd   = segPoints[s + 1];
                 uint32_t segLen   = segEnd - segStart;
-                // Z80: 127tick超のセグメントを127tickずつ分割
-                uint32_t p = segStart;
-                while (segLen > 127) {
-                    p += 127;
-                    allBoundaries.push_back(p);
-                    segLen -= 127;
-                }
-                // ^境界は明示的KEY_OFF（&境界は除く）
-                if (s + 1 < segPoints.size() - 1) {
-                    // tieBoundariesに含まれていれば^境界（KEY_OFFあり）
-                    for (uint32_t tb : tieBoundaries) {
-                        if (tb == segEnd) {
-                            allBoundaries.push_back(segEnd);
-                            break;
-                        }
+                // &境界がこのセグメント内にあるか確認
+                // ある場合、自動分割は最初の&境界までのみ適用
+                uint32_t autoSplitEnd = segEnd;
+                for (uint32_t as : ampSegStarts) {
+                    if (as > segStart && as < segEnd) {
+                        autoSplitEnd = as;
+                        break;
                     }
                 }
+                // Z80: 127tick超のセグメントを127tickずつ分割
+                uint32_t remain = autoSplitEnd - segStart;
+                uint32_t p = segStart;
+                while (remain > 127) {
+                    p += 127;
+                    allBoundaries.push_back(p);
+                    remain -= 127;
+                }
+                // ^境界は明示的KEY_OFF
+                if (s + 1 < segPoints.size() - 1)
+                    allBoundaries.push_back(segEnd);
             }
             // 重複除去・ソート
             std::sort(allBoundaries.begin(), allBoundaries.end());
