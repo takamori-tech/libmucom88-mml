@@ -326,8 +326,7 @@ private:
         size_t   breakPos;      // /（ブレーク）の位置（npos=なし）
         uint32_t breakTick;     // /のtick
         size_t   breakEvIdx;    // /のイベントインデックス
-        // ループ開始時のState（octave等の復元用は不要: 展開済みイベントで処理）
-        int      dummy = 0;     // placeholder
+        int      volumeAtStart = 0; // ループ開始時のボリューム（(/)累積補正用）
     };
 
     struct State {
@@ -1101,12 +1100,12 @@ private:
                 LoopFrame lf;
                 lf.startPos     = pos;
                 lf.startTick    = st.tick;
-                // State は展開済みイベントで引き継がれるためコピー不要
                 lf.eventStart   = events.size();
                 lf.count        = 0;  // ]で決定
                 lf.breakPos     = std::string::npos;
                 lf.breakTick    = 0;
                 lf.breakEvIdx   = 0;
+                lf.volumeAtStart = st.volume; // (/)累積補正用
                 st.loopStack.push_back(lf);
                 break;
             }
@@ -1138,6 +1137,13 @@ private:
                         events.begin() + lf.eventStart, events.end());
                     uint32_t bodyTicks = st.tick - lf.startTick;
 
+                    // Z80互換: ループ内 (/) ボリューム累積補正
+                    // Z80はランタイムで毎回(/)を実行→累積的に音量が変化
+                    // MmlParserは1回目のイベントをコピーするため、VOLUMEイベントの
+                    // 絶対値を反復ごとにデルタ分ずらす必要がある
+                    int volDelta = st.volume - lf.volumeAtStart; // 1反復あたりの音量変化
+                    int maxVol = (ch == 10) ? 255 : (ch == 6) ? 63 : 15;
+
                     // ブレーク情報
                     bool hasBreak = (lf.breakPos != std::string::npos);
                     size_t breakRelIdx = hasBreak ? (lf.breakEvIdx - lf.eventStart) : loopBody.size();
@@ -1149,15 +1155,22 @@ private:
                         uint32_t tickLimit = (isLast && hasBreak) ? breakRelTick : bodyTicks;
                         for (size_t ei = 0; ei < limit; ei++) {
                             MmlEvent ev = loopBody[ei];
-                            ev.tick += rep * bodyTicks + lf.startTick - lf.startTick;
                             // tick をベースからのオフセットに再計算
                             ev.tick = (loopBody[ei].tick - lf.startTick) + (lf.startTick + rep * bodyTicks);
+                            // VOLUMEイベント: (/)による累積変化を反映
+                            if (ev.type == MmlEventType::VOLUME && volDelta != 0) {
+                                ev.value = std::clamp(ev.value + rep * volDelta, 0, maxVol);
+                            }
                             events.push_back(ev);
                         }
                         if (isLast && hasBreak)
                             st.tick = lf.startTick + rep * bodyTicks + tickLimit;
                         else
                             st.tick = lf.startTick + (rep + 1) * bodyTicks;
+                    }
+                    // パーサーのボリューム状態を最終反復の値に更新
+                    if (volDelta != 0) {
+                        st.volume = std::clamp(st.volume + (count - 1) * volDelta, 0, maxVol);
                     }
                 }
                 break;
