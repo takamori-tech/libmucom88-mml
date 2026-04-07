@@ -1625,15 +1625,44 @@ private:
         on.channel  = ch;
         events.push_back(on);
 
-        // ^タイ境界TIE_KEYOFFイベント生成（Z80 FMSUB3互換）
-        // Z80: ^タイ接続点でRm1→FS3(KEYOFF), Rm0→FS2(リバーブ音量)
-        for (uint32_t boundary : tieBoundaries) {
-            MmlEvent tkev{};
-            tkev.type    = MmlEventType::TIE_KEYOFF;
-            tkev.tick    = st.tick + boundary;
-            tkev.note    = noteNum;
-            tkev.channel = ch;
-            events.push_back(tkev);
+        // ^タイ境界 + Z80自動分割境界のTIE_KEYOFFイベント生成（Z80 FMSUB3互換）
+        // Z80コンパイラは7bit長制限（max 127 ticks/bytecode）で自動分割し、
+        // 各分割点にtie bitを設定。FMSUB3でRm1→FS3(KEYOFF), Rm0→FS2(リバーブ音量)
+        if (collectTieBoundaries) {
+            // 明示的^境界に加え、各セグメント内の127tick超を自動分割
+            std::vector<uint32_t> allBoundaries;
+            // セグメント境界: [0, b1, b2, ..., ticks]
+            std::vector<uint32_t> segPoints;
+            segPoints.push_back(0);
+            for (uint32_t b : tieBoundaries) segPoints.push_back(b);
+            segPoints.push_back(ticks);
+            for (size_t s = 0; s + 1 < segPoints.size(); s++) {
+                uint32_t segStart = segPoints[s];
+                uint32_t segEnd   = segPoints[s + 1];
+                uint32_t segLen   = segEnd - segStart;
+                // Z80: 127tick超のセグメントを127tickずつ分割
+                uint32_t p = segStart;
+                while (segLen > 127) {
+                    p += 127;
+                    allBoundaries.push_back(p);
+                    segLen -= 127;
+                }
+                // 明示的^境界（最終セグメント端は除く）
+                if (s + 1 < segPoints.size() - 1)
+                    allBoundaries.push_back(segEnd);
+            }
+            // 重複除去・ソート
+            std::sort(allBoundaries.begin(), allBoundaries.end());
+            allBoundaries.erase(std::unique(allBoundaries.begin(), allBoundaries.end()),
+                                allBoundaries.end());
+            for (uint32_t boundary : allBoundaries) {
+                MmlEvent tkev{};
+                tkev.type    = MmlEventType::TIE_KEYOFF;
+                tkev.tick    = st.tick + boundary;
+                tkev.note    = noteNum;
+                tkev.channel = ch;
+                events.push_back(tkev);
+            }
         }
 
         // NOTE_OFF（タイ継続中は出さない — 次行で延長される）
