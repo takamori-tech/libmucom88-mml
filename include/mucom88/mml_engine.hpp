@@ -165,16 +165,13 @@ public:
                 }
                 // 全非空チャンネルのendTickをmax計算に含める（Z80パディング互換）
                 uint32_t endTick = st.events.back().tick;
-                st.channelEndTick = endTick;  // per-channel ループ用
                 if (endTick > maxEnd) maxEnd = endTick;
                 if (!st.hasLoopPoint) continue;
                 anyLoop = true;
                 if (st.loopTick < m_commonLoopTick)
                     m_commonLoopTick = st.loopTick;
             }
-            // Z80互換: commonEndTickは常に設定（L無しでもチャンネル間長さ調整に使用）
-            // Z80コンパイラは全チャンネルをMaxCount(=max tcount)にパディングする
-            if (maxEnd > 0)
+            if (anyLoop && maxEnd > 0)
                 m_commonEndTick = maxEnd;
             if (m_commonLoopTick == UINT32_MAX)
                 m_commonLoopTick = 0;
@@ -375,20 +372,7 @@ public:
                 for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                     auto& st = m_channels[ch];
                     if (st.events.empty()) continue;
-                    // Z80互換 per-channel ループ:
-                    // チャンネルデータ終了時、commonEndTickに達するまでDATA TOPに自動ループ
-                    // Z80: 00h終端→IX+4/5(DATA TOP ADDRESS)へジャンプ（L有=Lポイント、L無=先頭）
-                    if (st.eventIdx >= st.events.size()) {
-                        if (m_commonEndTick > 0 && st.channelEndTick > 0) {
-                            uint32_t chTick = m_globalTick - m_loopTickOffset - st.channelTickOffset;
-                            if (chTick < m_commonEndTick) {
-                                // チャンネルリスタート（Z80 DATA TOP ループバック）
-                                st.channelTickOffset += st.channelEndTick;
-                                st.eventIdx = st.hasLoopPoint ? st.loopEventIdx : 0;
-                            }
-                        }
-                        if (st.eventIdx >= st.events.size()) continue;
-                    }
+                    if (st.eventIdx >= st.events.size()) continue;
                     processEvents(ch, m_globalTick);
                     if (st.noteOn && st.lfoEnabled && st.lfoDepth != 0)
                         tickLfo(ch);
@@ -502,15 +486,13 @@ public:
             }
 
             // eventIdxをループポイントに設定
-            // Z80: DATA TOP ADDRESS = Lポイント or チャンネル先頭
             if (st.hasLoopPoint) {
                 st.eventIdx = st.loopEventIdx;
             } else {
-                // Lコマンドがないチャンネル: チャンネル先頭からループ（Z80互換）
-                st.eventIdx = 0;
+                // Lコマンドがないチャンネル: ループせず沈黙を維持
+                // Z80プレイヤーではLなしトラックはループ時に再生されない
+                st.eventIdx = st.events.size();
             }
-            // per-channelループオフセットもリセット（グローバルループが管理）
-            st.channelTickOffset = 0;
 
             // ランタイム状態リセット（全可変状態をデフォルト値に復元）
             // Issue #19: ループ2周目以降のSSGピッチずれ修正
@@ -726,9 +708,6 @@ private:
         // Z80 MDSET→TO_EFC/EXMODE: 毎tickで4オペレータ独立F-Number + 4回KEY ON
         bool     csmEnabled     = false;
         int      csmDetune[4]   = {0, 0, 0, 0};  // OP1-OP4 デチューンオフセット
-        // Per-channel ループ（Z80: チャンネル終端→DATA TOP自動ループ）
-        uint32_t channelTickOffset = 0; // チャンネルリスタート時の累積tickオフセット
-        uint32_t channelEndTick    = 0; // チャンネルデータの終端tick
     };
 
     IFmEngine*  m_engine;
@@ -786,9 +765,9 @@ private:
     void processEvents(int ch, uint32_t tick)
     {
         auto& st = m_channels[ch];
-        // 曲全体ループ + per-channelループ: globalTickからオフセットを引いて
+        // 曲全体ループ: globalTickからグローバルloopTickOffsetを引いて
         // イベントの絶対tickと比較する（ループ巻き戻し後も正しく動作）
-        uint32_t chTick = tick - m_loopTickOffset - st.channelTickOffset;
+        uint32_t chTick = tick - m_loopTickOffset;
         while (st.eventIdx < st.events.size()) {
             const MmlEvent& ev = st.events[st.eventIdx];
             // commonEndTickを超えるイベントはスキップ（非破壊打ち切り、libmucom88-mml#2）
