@@ -1405,10 +1405,24 @@ private:
                         int slot = 0, data = 0;
                         if (pos < mml.size() && mml[pos] == ',') { pos++; slot = readInt(mml, pos, 0); }
                         if (pos < mml.size() && mml[pos] == ',') { pos++; data = readInt(mml, pos, 0); }
-                        // スロット(0-3) → YM2608オペレーターオフセット
+                        // Z80互換: スロット番号は1-based（1-4）
+                        // Z80 SETR4: slot 2↔3 スワップ後、DEC A, *4
+                        //   slot 1→op1(off=0), 2→op3(off=8), 3→op2(off=4), 4→op4(off=12)
                         static const int slotOff[] = { 0, 8, 4, 12 };
-                        int off = (slot >= 0 && slot <= 3) ? slotOff[slot] : 0;
-                        int addr = baseReg + off;
+                        int si = slot - 1;  // 1-based → 0-based
+                        int off = (si >= 0 && si <= 3) ? slotOff[si] : 0;
+                        // Z80 SETR8: COMNOW(チャンネル番号)をオフセットに加算
+                        // FM ch A-C(0-2): port0, offset=ch
+                        // FM ch H-J(7-9): port1(+0x100), offset=ch-7
+                        int chOff = 0;
+                        int portBase = 0;
+                        if (ch <= 2) {
+                            chOff = ch;   // A=0, B=1, C=2
+                        } else if (ch >= 7 && ch <= 9) {
+                            chOff = ch - 7;   // H=0, I=1, J=2
+                            portBase = 0x100;  // port 1
+                        }
+                        int addr = portBase + baseReg + off + chOff;
                         MmlEvent ev{};
                         ev.type = MmlEventType::REG_WRITE;
                         ev.tick = st.tick; ev.channel = ch;
