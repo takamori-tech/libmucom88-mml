@@ -1801,16 +1801,22 @@ private:
             if (peek >= mml.size() || mml[peek] != '^') break;
             pos = peek;  // ^が見つかったのでスペースを消費
             pos++;
-            int elen = 0;
-            if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
-                elen = readInt(mml, pos, 0);
-            else
-                elen = st.defLen;  // Z80互換: デフォルト音長(lコマンド値)
-            if (elen <= 0) elen = 4;
             if (tieBoundaries)
                 tieBoundaries->push_back(ticks);  // ^境界位置（加算前）
-            uint32_t et = applyDots(wt / elen, mml, pos);
-            ticks += et;
+            if (pos < mml.size() && mml[pos] == '%') {
+                // ^%N: クロック直接指定（付点なし）
+                pos++;
+                ticks += readInt(mml, pos, 0);
+            } else {
+                int elen = 0;
+                if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
+                    elen = readInt(mml, pos, 0);
+                else
+                    elen = st.defLen;  // Z80互換: デフォルト音長(lコマンド値)
+                if (elen <= 0) elen = 4;
+                uint32_t et = applyDots(wt / elen, mml, pos);
+                ticks += et;
+            }
         }
 
         // `&` タイ（従来形式）— &はZ80 TIEコマンド（KEY_OFFなし）
@@ -1837,29 +1843,42 @@ private:
             if (pos < mml.size() && (mml[pos]=='+' || mml[pos]=='#' || mml[pos]=='-'))
                 pos++;
 
-            int tlen = 0;
-            if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
-                tlen = readInt(mml, pos, st.defLen);
-            else
-                tlen = st.defLen;
             // &セグメント開始位置を記録（Z80自動分割はセグメント内で独立に行われる）
             if (ampSegStarts)
                 ampSegStarts->push_back(ticks);
-            uint32_t tt = applyDots(wt / tlen, mml, pos);
-            ticks += tt;
+            int tlen = 0;
+            if (pos < mml.size() && mml[pos] == '%') {
+                // &note%N: クロック直接指定（付点なし）
+                pos++;
+                ticks += readInt(mml, pos, 0);
+                tlen = 0;  // ^のデフォルト長には使わない
+            } else {
+                if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
+                    tlen = readInt(mml, pos, st.defLen);
+                else
+                    tlen = st.defLen;
+                uint32_t tt = applyDots(wt / tlen, mml, pos);
+                ticks += tt;
+            }
             // ^ もここで処理（^はZ80 tie bitでKEY_OFF境界になる）
             while (pos < mml.size() && mml[pos] == '^') {
                 pos++;
-                int elen2 = 0;
-                if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
-                    elen2 = readInt(mml, pos, 0);
-                else
-                    elen2 = tlen;
-                if (elen2 <= 0) elen2 = 4;
                 if (tieBoundaries)
                     tieBoundaries->push_back(ticks);  // ^境界位置（加算前）
-                uint32_t et2 = applyDots(wt / elen2, mml, pos);
-                ticks += et2;
+                if (pos < mml.size() && mml[pos] == '%') {
+                    // ^%N: クロック直接指定
+                    pos++;
+                    ticks += readInt(mml, pos, 0);
+                } else {
+                    int elen2 = 0;
+                    if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
+                        elen2 = readInt(mml, pos, 0);
+                    else
+                        elen2 = (tlen > 0) ? tlen : st.defLen;
+                    if (elen2 <= 0) elen2 = 4;
+                    uint32_t et2 = applyDots(wt / elen2, mml, pos);
+                    ticks += et2;
+                }
             }
         }
 

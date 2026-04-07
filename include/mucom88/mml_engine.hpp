@@ -374,14 +374,10 @@ public:
                 for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                     auto& st = m_channels[ch];
                     if (st.events.empty()) continue;
-                    // Z80互換 per-channelループ: イベント末尾到達 + Lポイントあり → 即座にループ
-                    // advance()レベルで判定（processEventsはeventIdx>=sizeだとスキップされるため）
-                    if (st.eventIdx >= st.events.size() && st.hasLoopPoint
-                        && st.perChEndTick > st.loopTick) {
-                        uint32_t bodyLen = st.perChEndTick - st.loopTick;
-                        st.perChLoopOffset += bodyLen;
-                        st.eventIdx = st.loopEventIdx;
-                    }
+                    // Z80互換: チャンネルのイベントが尽きたら無音で待機
+                    // Z80コンパイラは全チャンネルをMaxCountにパディングするため、
+                    // 短いチャンネルもcommonEndTickまで待機し、globalLoopRestartで一斉ループ。
+                    // per-channelの独立ループはZ80にはない（Issue #60）。
                     if (st.eventIdx >= st.events.size()) continue;
                     processEvents(ch, m_globalTick);
                     if (st.noteOn && st.lfoEnabled && st.lfoDepth != 0)
@@ -783,10 +779,9 @@ private:
     void processEvents(int ch, uint32_t tick)
     {
         auto& st = m_channels[ch];
-      for (;;) {  // per-channelループ再入用
-        // 曲全体ループ: globalTickからグローバルloopTickOffsetを引き、
-        // さらにper-channel独立ループオフセットを引いてイベント絶対tickと比較
-        uint32_t chTick = tick - m_loopTickOffset - st.perChLoopOffset;
+      {
+        // 曲全体ループ: globalTickからグローバルloopTickOffsetを引いてイベント絶対tickと比較
+        uint32_t chTick = tick - m_loopTickOffset;
         while (st.eventIdx < st.events.size()) {
             const MmlEvent& ev = st.events[st.eventIdx];
             // commonEndTickを超えるイベントはスキップ（非破壊打ち切り、libmucom88-mml#2）
@@ -1125,22 +1120,11 @@ private:
             st.eventIdx++;
         }
 
-        // Z80互換 per-channelループ: イベント末尾到達 + Lポイントあり → 即座にループ
-        // Z80ランタイムでは各チャンネルがend mark到達時にDATA TOP(Lポイント)へ独立してジャンプ。
-        // 他チャンネルのcommonEndTickを待たずにループ本体を繰り返す。
-        // per-channelループはadvance()レベルで処理されるため、
-        // processEvents内でのイベント末尾到達後ループは不要。
-        // commonEndTick超過スキップ等でeventIdxがsize()に達した場合の
-        // フォールバックとしてのみ残す。
-        if (st.eventIdx >= st.events.size() && st.hasLoopPoint
-            && st.perChEndTick > st.loopTick) {
-            uint32_t bodyLen = st.perChEndTick - st.loopTick;
-            st.perChLoopOffset += bodyLen;
-            st.eventIdx = st.loopEventIdx;
-            continue;  // 新しいオフセットで再入
-        }
-        break;  // ループ不要 or Lポイントなし
-      }  // for(;;)
+        // Z80互換: イベント末尾到達時は無音待機
+        // Z80コンパイラは全チャンネルをMaxCountにパディングするため、
+        // 短いチャンネルもcommonEndTickまで無音で待機する。
+        // globalLoopRestartで全チャンネルが一斉にLポイントへ戻る。
+      }
     }
 
     // =====================================================================
