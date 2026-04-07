@@ -449,8 +449,11 @@ public:
             }
         }
 
-        // 全チャンネル終端 → 停止（ループなし時）
-        if (!m_loop) {
+        // 全チャンネル終端 → 停止
+        // - m_loop=false: 常に停止
+        // - m_loop=true + commonEndTick>0: globalLoopRestartが処理するため停止しない
+        // - m_loop=true + commonEndTick==0: L無し曲 → ループ不可、残留音防止のため停止
+        if (!m_loop || m_commonEndTick == 0) {
             bool allDone = true;
             for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                 if (m_channels[ch].events.empty()) continue;
