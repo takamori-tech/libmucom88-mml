@@ -348,6 +348,7 @@ private:
         // エコーマクロ（\コマンド、MUCOM88 SETBEF互換）
         int      echoCount = 0;     // \=N: 繰り返し数（0=無効）
         int      echoVolRed = 0;    // \=N,M: 音量減衰値
+        uint32_t lastFullTicks = 0; // Z80 BEFCO互換: 直前ノートのフル音長（staccato前）
         int      pcmVolMode = 0;   // V0=baseVol(IX+6), V1=addVol(IX+7)（ADPCM-B用、現在未使用）
         int      tvOffset   = 0;   // V N: Total Volume Offset（Z80 muc88.asm TV_OFS互換）
         std::vector<LoopFrame> loopStack;  // ネストループ用スタック
@@ -626,9 +627,12 @@ private:
                         if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
                             st.echoVolRed = readInt(mml, pos, 0);
                     }
-                } else if (st.echoCount > 0) {
-                    // \: 直前のノートをエコー再生
-                    // 直前のNOTE_ONを探して音量-echoVolRedで複製
+                } else if (st.echoCount > 0 && st.lastFullTicks > 0) {
+                    // \: 直前のノートをエコー再生（Z80 SETBEF/STBF3互換）
+                    // Z80はBEFCO（直前ノートのフル音長、staccato適用前）を使用する。
+                    // events[i].durationはstaccato適用後のkeyOnTicksなので、
+                    // st.lastFullTicks（= Z80のBEFCO相当）でtickを進める。
+                    uint32_t echoDur = st.lastFullTicks;  // Z80 BEFCO互換
                     for (int i = (int)events.size() - 1; i >= 0; i--) {
                         if (events[i].type == MmlEventType::NOTE_ON && events[i].channel == ch) {
                             // 音量下げイベント
@@ -639,20 +643,21 @@ private:
                             volDown.channel = ch;
                             events.push_back(volDown);
 
-                            // ノート複製（同じ音高、同じ音長）
+                            // ノート複製（同じ音高、フル音長で発音）
                             MmlEvent echoOn = events[i];
                             echoOn.tick = st.tick;
+                            echoOn.duration = echoDur;
                             events.push_back(echoOn);
 
                             // NOTE_OFF
                             MmlEvent echoOff{};
                             echoOff.type = MmlEventType::NOTE_OFF;
-                            echoOff.tick = st.tick + events[i].duration;
+                            echoOff.tick = st.tick + echoDur;
                             echoOff.note = events[i].note;
                             echoOff.channel = ch;
                             events.push_back(echoOff);
 
-                            st.tick += events[i].duration;
+                            st.tick += echoDur;
 
                             // 音量復帰
                             MmlEvent volUp{};
@@ -1547,6 +1552,7 @@ private:
             st.tieActive = tieOut;
             st.tieNote   = tieOut ? noteNum : -1;
             st.tick += ticks;
+            st.lastFullTicks = ticks;  // Z80 BEFCO互換
             return;
         }
 
@@ -1595,6 +1601,7 @@ private:
         }
 
         st.tick += ticks;
+        st.lastFullTicks = ticks;  // Z80 BEFCO互換: エコー用にフル音長を記録
     }
 
     // 複数ドット読み取り + tick加算ヘルパー
