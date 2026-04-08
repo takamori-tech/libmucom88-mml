@@ -954,14 +954,28 @@ private:
                     ticks = readInt(mml, pos, 0);
                 } else {
                     int len = 0;
-                    if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
+                    bool explicitLen = false;
+                    if (pos < mml.size() && std::isdigit((unsigned char)mml[pos])) {
                         len = readInt(mml, pos, st.defLen);
-                    else
+                        explicitLen = true;
+                    } else {
                         len = st.defLen;
+                    }
                     int dotCount = 0;
                     while (pos < mml.size() && mml[pos] == '.') { dotCount++; pos++; }
-                    bool tieDummy = false;
-                    ticks = calcTicks(len, dotCount, st, mml, pos, tieDummy);
+                    // Z80 SETRS2: 数値なしの場合COUNT(=defLen)をそのまま使用
+                    // defLenIsClock時はクロック直接値として扱う（wholeTick/lenしない）
+                    if (!explicitLen && st.defLenIsClock) {
+                        ticks = len;
+                        int dot = (int)ticks;
+                        for (int d = 0; d < dotCount; d++) {
+                            dot >>= 1;
+                            ticks += dot;
+                        }
+                    } else {
+                        bool tieDummy = false;
+                        ticks = calcTicks(len, dotCount, st, mml, pos, tieDummy);
+                    }
                 }
 
                 MmlEvent ev{};
@@ -1162,7 +1176,6 @@ private:
                     std::vector<MmlEvent> loopBody(
                         events.begin() + lf.eventStart, events.end());
                     uint32_t bodyTicks = st.tick - lf.startTick;
-
                     // Z80互換: ループ内 (/) ボリューム累積補正
                     // Z80はランタイムで毎回(/)を実行→累積的に音量が変化
                     // MmlParserは1回目のイベントをコピーするため、VOLUMEイベントの
@@ -1382,12 +1395,15 @@ private:
                 break;
             }
             case '%': {
-                // tick直接指定 %N
+                // Z80 SETDCO: %N はCOUNT変数を直接設定（l%Nと同等）
+                // 次のノート/レストのデフォルト長をNクロックに設定する
+                // ※ st.tickに加算してはいけない（二重カウントになる）
                 pos++;
-                int ticks = readInt(mml, pos, 0);
-                // %N は直前の音符の長さを tick で直接指定
-                // 単独で使われた場合は休符扱い
-                if (ticks > 0) st.tick += ticks;
+                int val = readInt(mml, pos, 0);
+                if (val > 0) {
+                    st.defLen = val;
+                    st.defLenIsClock = true;
+                }
                 break;
             }
             case 'y': {
@@ -1588,7 +1604,11 @@ private:
                     else
                         elen = st.defLen;
                     if (elen <= 0) elen = 4;
-                    ticks += st.wholeTick / elen;
+                    uint32_t t0 = (st.defLenIsClock && elen == st.defLen)
+                                  ? (uint32_t)elen : st.wholeTick / elen;
+                    int d = (int)t0;
+                    while (pos < mml.size() && mml[pos] == '.') { pos++; d >>= 1; t0 += d; }
+                    ticks += t0;
                 }
             }
             // &タイ — Z80 TIEコマンド(KEY_OFFなし)
@@ -1609,9 +1629,17 @@ private:
                     ticks += readInt(mml, pos, 0);
                 } else if (pos < mml.size() && std::isdigit((unsigned char)mml[pos])) {
                     tlen = readInt(mml, pos, st.defLen);
-                    ticks += st.wholeTick / tlen;
+                    uint32_t t0 = st.wholeTick / tlen;
+                    int d = (int)t0;
+                    while (pos < mml.size() && mml[pos] == '.') { pos++; d >>= 1; t0 += d; }
+                    ticks += t0;
                 } else {
-                    ticks += st.wholeTick / st.defLen;
+                    // defLenIsClock時はクロック直接値を使用
+                    uint32_t t0 = st.defLenIsClock
+                                  ? (uint32_t)st.defLen : st.wholeTick / st.defLen;
+                    int d = (int)t0;
+                    while (pos < mml.size() && mml[pos] == '.') { pos++; d >>= 1; t0 += d; }
+                    ticks += t0;
                 }
             }
         } else {
