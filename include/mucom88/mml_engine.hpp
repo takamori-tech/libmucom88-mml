@@ -119,6 +119,7 @@ public:
         m_audioLeftMs       = 0.0;
         m_globalTempo       = 120;
         m_loopTickOffset    = 0;
+        m_perChannelLoop   = false;
 
         // 全チャンネルのランタイム状態をフルリセット（libmucom88-mml#2）
         // イベント列(events)は保持し、再生位置とランタイム状態のみ初期化
@@ -346,16 +347,32 @@ public:
                 m_timerBCount += m_timerBPeriod;
                 m_globalTick++;
 
-                // 曲全体ループ判定: chTick が commonEndTick に達したら全チャンネル同時ループ
-                // Wiki: L = "曲全体のループ位置指定"
+                // ── ループ判定 ──
                 if (m_loop && m_commonEndTick > 0) {
-                    uint32_t chTick = m_globalTick - m_loopTickOffset;
-                    if (chTick >= m_commonEndTick) {
-                        globalLoopRestart();
-                        // ループ後のイベントを即座に処理
+                    if (m_perChannelLoop) {
+                        // per-channel独立ループ（Issue #62）
+                        // Z80互換: 各チャンネルが独立にend markerでDATA TOPへジャンプ。
+                        // 初回globalLoopRestart後、各チャンネルは (commonEndTick - loopTick) 周期で独立ループ。
                         for (int ch2 = 0; ch2 < MAX_MML_CHANNELS; ch2++) {
-                            if (m_channels[ch2].events.empty()) continue;
-                            processEvents(ch2, m_globalTick);
+                            auto& st2 = m_channels[ch2];
+                            if (st2.events.empty() || !st2.hasLoopPoint) continue;
+                            if (m_globalTick >= st2.nextRestartTick) {
+                                perChannelRestart(ch2);
+                                st2.nextRestartTick += st2.perChLoopLen;
+                                // リスタート直後のイベントを即座に処理
+                                processEvents(ch2, m_globalTick);
+                            }
+                        }
+                    } else {
+                        // 初回ループ: 全チャンネル同時リスタート（MaxCountパディング互換）
+                        uint32_t chTick = m_globalTick - m_loopTickOffset;
+                        if (chTick >= m_commonEndTick) {
+                            globalLoopRestart();
+                            // ループ後のイベントを即座に処理
+                            for (int ch2 = 0; ch2 < MAX_MML_CHANNELS; ch2++) {
+                                if (m_channels[ch2].events.empty()) continue;
+                                processEvents(ch2, m_globalTick);
+                            }
                         }
                     }
                 }
@@ -374,10 +391,6 @@ public:
                 for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                     auto& st = m_channels[ch];
                     if (st.events.empty()) continue;
-                    // Z80互換: チャンネルのイベントが尽きたら無音で待機
-                    // Z80コンパイラは全チャンネルをMaxCountにパディングするため、
-                    // 短いチャンネルもcommonEndTickまで待機し、globalLoopRestartで一斉ループ。
-                    // per-channelの独立ループはZ80にはない（Issue #60）。
                     if (st.eventIdx >= st.events.size()) continue;
                     processEvents(ch, m_globalTick);
                     if (st.noteOn && st.lfoEnabled && st.lfoDepth != 0)
@@ -657,6 +670,177 @@ public:
             }
         }
         m_engine->writeReg(0, 0x07, m_ssgMixer);
+
+        // per-channel独立ループの初期化（Issue #62）
+        // Z80では各チャンネルが独立にend markerでDATA TOPへジャンプする。
+        // 初回のglobalLoopRestartで全チャンネル一斉に巻き戻した後、
+        // 2回目以降は各チャンネルが独立した周期（commonEndTick - loopTick）でループする。
+        m_perChannelLoop = true;
+        for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
+            auto& st = m_channels[ch];
+            if (st.events.empty() || !st.hasLoopPoint) continue;
+            st.perChLoopLen = m_commonEndTick - st.loopTick;
+            if (st.perChLoopLen == 0) st.perChLoopLen = 1;
+            // perChTickBase: tick - perChTickBase で chTick(=loopTick起点) を算出
+            st.perChTickBase = m_globalTick - st.loopTick;
+            st.nextRestartTick = m_globalTick + st.perChLoopLen;
+        }
+    }
+
+    // ── per-channelリスタート: 単一チャンネルをLポイントに巻き戻す ──
+    // Z80互換: 各チャンネルが独立にend marker到達→DATA TOPジャンプ
+    void perChannelRestart(int ch)
+    {
+        auto& st = m_channels[ch];
+
+        // KEY_OFF
+        if (st.noteOn) {
+            if      (isFM(ch))  fmKeyOff(toFMIndex(ch));
+            else if (isSSG(ch)) ssgKeyOff(toSSGIndex(ch));
+            st.noteOn = false;
+        }
+
+        // eventIdx巻き戻し
+        st.eventIdx = st.loopEventIdx;
+
+        // ランタイム状態リセット（globalLoopRestartと同一）
+        st.currentNote  = 0;
+        st.noteOnCount  = 0;
+        st.reverbActive = false;
+        st.portaActive  = false;
+        st.csmEnabled   = false;
+        st.csmDetune[0] = st.csmDetune[1] = st.csmDetune[2] = st.csmDetune[3] = 0;
+        st.detune       = 0;
+        st.lfoPitchOffset = 0;
+        st.lfoDelayCounter = 0;
+        st.lfoStepCounter  = 0;
+        st.lfoRateCounter  = 0;
+        st.lfoDirection    = 1;
+        st.lfoEnabled   = false;
+        st.lfoDelay     = 0;
+        st.lfoRate      = 1;
+        st.lfoDepth     = 0;
+        st.lfoCount     = 0;
+        st.volume       = 12;
+        st.pan          = 3;
+        st.staccato     = 0;
+        st.ssgSoftEnv   = false;
+        st.ssgEnvMode   = false;
+        st.ssgEnvAL = st.ssgEnvAR = st.ssgEnvDR = 0;
+        st.ssgEnvSL = st.ssgEnvSR = st.ssgEnvRR = 0;
+        st.ssgEnvPhase  = 0;
+        st.ssgEnvValue  = 0;
+        st.ssgEnvKeyOnTick = false;
+        st.ssgReleasing = false;
+        st.ssgRelVol    = 0;
+        st.reverbValue    = 0;
+        st.reverbEnabled  = false;
+        st.reverbQCutOnly = false;
+
+        // SSGミキサーリセット（このチャンネルがSSGの場合）
+        if (isSSG(ch)) {
+            int si = toSSGIndex(ch);
+            m_ssgMixer |= (1 << si);       // トーン無効
+            m_ssgMixer |= (1 << (si + 3)); // ノイズ無効
+        }
+
+        // ループ再開位置までのイベントを走査して状態復元
+        for (size_t i = 0; i < st.eventIdx; i++) {
+            const auto& ev = st.events[i];
+            switch (ev.type) {
+            case MmlEventType::VOLUME:   st.volume = ev.value; break;
+            case MmlEventType::PATCH:
+                if (isFM(ch))  m_fmPatchNo[toFMIndex(ch)] = ev.value;
+                if (isSSG(ch)) ssgApplyPreset(toSSGIndex(ch), ev.value);
+                break;
+            case MmlEventType::PAN:       st.pan = ev.value; break;
+            case MmlEventType::STACCATO:  st.staccato = ev.value; break;
+            case MmlEventType::DETUNE:    st.detune = ev.value; break;
+            case MmlEventType::VIBRATO:
+                st.lfoEnabled = true;
+                st.lfoDelay = ev.vibDelay; st.lfoRate = ev.vibRate;
+                st.lfoDepth = ev.vibDepth; st.lfoCount = ev.vibCount;
+                break;
+            case MmlEventType::VIBRATO_SWITCH:
+                st.lfoEnabled = (ev.value != 0); break;
+            case MmlEventType::LFO_PARAM:
+                switch (ev.vibDelay) {
+                    case 0: st.lfoDelay = ev.value; break;
+                    case 1: st.lfoRate  = std::max(ev.value, 1); break;
+                    case 2: st.lfoDepth = ev.value; break;
+                    case 3: st.lfoCount = std::max(ev.value, 1); break;
+                }
+                break;
+            case MmlEventType::REG_WRITE: {
+                int addr = ev.note;
+                int data = ev.value;
+                if (addr >= 0xF0 && addr <= 0xF2) {
+                    int si = addr - 0xF0;
+                    bool toneOn  = (data & 1) != 0;
+                    bool noiseOn = (data & 2) != 0;
+                    if (toneOn)  m_ssgMixer &= ~(1 << si);
+                    else         m_ssgMixer |=  (1 << si);
+                    if (noiseOn) m_ssgMixer &= ~(1 << (si+3));
+                    else         m_ssgMixer |=  (1 << (si+3));
+                }
+                break;
+            }
+            case MmlEventType::PORTAMENTO: {
+                int startNote = ev.note;
+                int endNote   = ev.value;
+                int dur       = (int)ev.duration;
+                if (dur <= 0) dur = 1;
+                int sb = 0, eb = 0;
+                uint16_t sf = noteToFnum(startNote, sb);
+                uint16_t ef = noteToFnum(endNote, eb);
+                int startBF = (sb << 11) | sf;
+                int endBF   = (eb << 11) | ef;
+                st.portaActive      = true;
+                st.portaStartFnum   = startBF;
+                st.portaEndFnum     = endBF;
+                st.portaCurrentFnum = startBF;
+                st.portaTicksLeft   = dur;
+                st.portaStep        = (endBF - startBF) / dur;
+                break;
+            }
+            case MmlEventType::CSM_MODE:
+                st.csmDetune[0] = ev.vibDelay; st.csmDetune[1] = ev.vibRate;
+                st.csmDetune[2] = ev.vibDepth; st.csmDetune[3] = ev.vibCount;
+                st.csmEnabled = !(st.csmDetune[0] == 0 && st.csmDetune[1] == 0 &&
+                                  st.csmDetune[2] == 0 && st.csmDetune[3] == 0);
+                break;
+            case MmlEventType::REVERB_ENVELOPE:
+                st.reverbValue = ev.value; st.reverbEnabled = true; break;
+            case MmlEventType::REVERB_SWITCH:
+                st.reverbEnabled = (ev.value != 0); break;
+            case MmlEventType::REVERB_MODE:
+                st.reverbQCutOnly = (ev.value != 0); break;
+            case MmlEventType::SSG_ENVELOPE:
+                st.ssgSoftEnv = true;
+                st.ssgEnvAL = ev.envAL; st.ssgEnvAR = ev.envAR;
+                st.ssgEnvDR = ev.envDR; st.ssgEnvSL = ev.envSL;
+                st.ssgEnvSR = ev.envSR; st.ssgEnvRR = ev.envRR;
+                break;
+            default: break;
+            }
+        }
+
+        // 音色/PAN/音量復元
+        if (isFM(ch)) {
+            int fi = toFMIndex(ch);
+            fmApplyPatch(fi, m_fmPatchNo[fi]);
+            fmSetVolume(fi, st.volume);
+            int port = fmPort(fi);
+            int off  = fmOffset(fi);
+            m_engine->writeReg(port, 0xB4 + off,
+                (uint8_t)(panToReg(st.pan)));
+        }
+        if (isSSG(ch)) {
+            m_engine->writeReg(0, 0x07, m_ssgMixer);
+        }
+
+        // per-channel tick base更新
+        st.perChTickBase = m_globalTick - st.loopTick;
     }
 
 private:
@@ -718,6 +902,10 @@ private:
         // per-channelループ（Z80互換: 各チャンネルが独立してLポイントに戻る）
         uint32_t perChEndTick      = 0;  // チャンネル固有の終端tick
         uint32_t perChLoopOffset   = 0;  // per-channelループの累積tickオフセット
+        // per-channel独立ループ（Issue #62: 初回globalLoopRestart後に有効化）
+        uint32_t perChLoopLen      = 0;  // チャンネル固有のループ周期 (commonEndTick - loopTick)
+        uint32_t perChTickBase     = 0;  // chTick計算用ベース (tick - perChTickBase = chTick - loopTick)
+        uint32_t nextRestartTick   = 0;  // 次のper-channelリスタートの絶対tick
         // CSMモード（Sコマンド、FM ch3 エフェクトモード）
         // Z80 MDSET→TO_EFC/EXMODE: 毎tickで4オペレータ独立F-Number + 4回KEY ON
         bool     csmEnabled     = false;
@@ -743,6 +931,7 @@ private:
     uint32_t    m_overrideEndTick  = 0;    // 外部から指定されたループ終端tick（0=未指定）
     uint32_t    m_commonLoopTick    = 0;    // 全チャンネル共通のLコマンドtick
     uint32_t    m_loopTickOffset    = 0;    // ループ巻き戻しの累積tickオフセット
+    bool        m_perChannelLoop   = false; // per-channel独立ループモード（初回restart後true）
     std::array<ChannelState, MAX_MML_CHANNELS> m_channels;
     std::unordered_map<int, FmPatch>           m_patchMap;
     std::array<int, MAX_FM_CHANNELS>           m_fmPatchNo;   // FM音色番号
@@ -780,8 +969,12 @@ private:
     {
         auto& st = m_channels[ch];
       {
-        // 曲全体ループ: globalTickからグローバルloopTickOffsetを引いてイベント絶対tickと比較
-        uint32_t chTick = tick - m_loopTickOffset;
+        // チャンネルtick計算: per-channelループモード時はチャンネル固有のtick baseを使用
+        // per-channel: chTick = tick - perChTickBase で、loopTick起点にマッピング
+        // global: chTick = tick - m_loopTickOffset
+        uint32_t chTick = (m_perChannelLoop && st.hasLoopPoint)
+                        ? (tick - st.perChTickBase)
+                        : (tick - m_loopTickOffset);
         while (st.eventIdx < st.events.size()) {
             const MmlEvent& ev = st.events[st.eventIdx];
             // commonEndTickを超えるイベントはスキップ（非破壊打ち切り、libmucom88-mml#2）
