@@ -407,17 +407,17 @@ public:
                     auto& cst = m_channels[ch];
                     int si = toSSGIndex(ch);
 
-                    if (cst.ssgSoftEnv && (cst.noteOn || cst.ssgEnvPhase > 0)) {
+                    if (cst.ssgSoftEnv) {
                         // ── MUCOM88 SOFENV互換 ADSRステートマシン ──
-                        // Z80 SSSUB0: BIT 7,(IX+6) → エンベロープ有効時のみSOFENV呼び出し
-                        // 発音中(noteOn)またはRELEASE中(phase>0)のみ処理。
-                        // 未発音時（休符等）はSOFENVを回さない（Z80と同じ）。
+                        // Z80 SSSUB0: BIT 7,(IX+6) → エンベロープ有効フラグのみチェック
+                        // Z80はnoteOnやphaseに関係なく、フラグが立っていれば毎tick書き込み。
+                        // RELEASE完了後もenvValue=0のまま毎tick音量0を書き込み続ける。
                         // Z80互換: KEY_ON tickではSOFENV進行をスキップ（SOFEV7のみ）
                         // Z80 SSSUBG: envValue=AL → CALL SOFEV7（音量計算のみ）
                         // Z80 SSSUB0: CALL SOFENV（エンベロープ進行+音量計算）← 次tick以降
                         if (cst.ssgEnvKeyOnTick) {
                             cst.ssgEnvKeyOnTick = false;
-                        } else if (cst.ssgEnvPhase > 0) {
+                        } else {
                             ssgTickEnvelope(ch);
                         }
                         int vol = std::clamp(cst.volume - m_globalAtt / 4, 0, 15);
