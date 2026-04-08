@@ -259,6 +259,7 @@ public:
     int  chNote(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].currentNote : 0; }
     int  chVolume(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].volume : 0; }
     int  chPan(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].pan : 3; }
+    int  chReverb(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].reverbValue : 0; }
     // noteOnトリガーカウンター（UI activity検出用、advance()毎にインクリメント）
     // chNoteOn()はワンショット楽器で一瞬falseになるため、カウンターで検出する
     uint32_t chNoteOnCount(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].noteOnCount : 0; }
