@@ -223,6 +223,10 @@ public:
         // チャンネル状態をリセット（複数行またぎで引き継ぐため）
         for (auto& st : m_chState) st = State{};
 
+        // グローバルエコーパラメータをリセット（Z80 COMPIL: BFDAT=1相当）
+        m_echoBufIdx = 0;  // Z80初期値: BFDAT=1 → index 0（最新のトーン）
+        m_echoVolRed = 0;  // Z80初期値: VDDAT=0
+
         // 前処理：マクロと音色定義を先に収集
         collectMacros(muc);
         collectAllPatches(muc);
@@ -346,8 +350,8 @@ private:
         bool     tieActive = false; // 行末タイ(&)継続フラグ
         int      tieNote   = -1;    // タイ継続中のノート番号
         // エコーマクロ（\コマンド、MUCOM88 SETBEF互換）
-        int      echoCount = 0;     // \=N: 繰り返し数（0=無効）
-        int      echoVolRed = 0;    // \=N,M: 音量減衰値
+        // echoCount/echoVolRedはグローバル変数（m_echoBufIdx/m_echoVolRed）に移動
+        // Z80コンパイラのBFDAT/VDDATは全チャンネル共有のグローバル変数
         uint32_t lastFullTicks = 0; // Z80 BEFCO互換: 直前ノートのフル音長（staccato前）
         int      pcmVolMode = 0;   // V0=baseVol(IX+6), V1=addVol(IX+7)（ADPCM-B用、現在未使用）
         int      tvOffset   = 0;   // V N: Total Volume Offset（Z80 muc88.asm TV_OFS互換）
@@ -359,6 +363,11 @@ private:
     std::unordered_map<int, std::string>    m_macros;
     std::unordered_map<int, Mucom88Patch>   m_patches;
     std::array<State, 11>                   m_chState;
+
+    // Z80 BFDAT/VDDAT互換: グローバルエコーパラメータ（全チャンネル共有）
+    // Z80コンパイラでは\=N,MのN(BFDAT)とM(VDDAT)は固定アドレスのグローバル変数
+    int m_echoBufIdx = 0;   // BFDAT: BEFTONEバッファインデックス（N-1、初期値=1→0相当）
+    int m_echoVolRed = 0;   // VDDAT: 音量減衰値（初期値=0）
 
     std::vector<uint8_t> m_voiceDat;  // voice.dat バイナリデータ
 
@@ -611,29 +620,31 @@ private:
             }
 
             // エコーマクロ（\コマンド、MUCOM88 SETBEF互換）
-            // \=N,M: エコーパラメータ設定（N=繰り返し数1-9, M=音量減衰0-15）
-            // \: 直前のノートを音量-Mで再発音
+            // Z80コンパイラのBFDAT/VDDATはグローバル変数 → m_echoBufIdx/m_echoVolRed
+            // \=N,M: エコーパラメータ設定（N=トーンバッファインデックス1-9, M=音量減衰0-15）
+            // \: 直前のノートを音量-Mで再発音（Z80では常に実行、"echo off"状態は存在しない）
             if (mml[pos] == '\\') {
                 pos++;
                 if (pos < mml.size() && mml[pos] == '=') {
-                    // \=N,M: パラメータ設定
+                    // \=N,M: パラメータ設定（グローバル、全チャンネル共有）
                     pos++;
                     int n = 1;
                     if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
                         n = readInt(mml, pos, 1);
                     if (n < 1) n = 1;
                     if (n > 9) n = 9;
-                    st.echoCount = n;
+                    m_echoBufIdx = n - 1;  // Z80 BFDAT = N-1（BEFTONEバッファインデックス）
                     if (pos < mml.size() && mml[pos] == ',') {
                         pos++;
                         if (pos < mml.size() && std::isdigit((unsigned char)mml[pos]))
-                            st.echoVolRed = readInt(mml, pos, 0);
+                            m_echoVolRed = readInt(mml, pos, 0);
                     }
-                } else if (st.echoCount > 0 && st.lastFullTicks > 0) {
-                    // \: 直前のノートをエコー再生（Z80 SETBEF/STBF3互換）
+                } else if (st.lastFullTicks > 0) {
+                    // \: 直前のノートをエコー再生（Z80 STBF3互換）
                     // Z80はBEFCO（直前ノートのフル音長、staccato適用前）を使用する。
                     // events[i].durationはstaccato適用後のkeyOnTicksなので、
                     // st.lastFullTicks（= Z80のBEFCO相当）でtickを進める。
+                    // Z80 STBF3にはechoCount>0チェックがない — \は常にエコーを生成する
                     uint32_t echoDur = st.lastFullTicks;  // Z80 BEFCO互換
                     for (int i = (int)events.size() - 1; i >= 0; i--) {
                         if (events[i].type == MmlEventType::NOTE_ON && events[i].channel == ch) {
@@ -645,9 +656,9 @@ private:
                             // FM: IX+6は+4オフセット含みのため負値許容（Issue #57と同じ）
                             // SSG: VOLUPS → RET NC で範囲外なら変更しない → 0クランプ
                             if (isFMChannel(ch)) {
-                                volDown.value = st.volume - st.echoVolRed;  // FM: クランプなし
+                                volDown.value = st.volume - m_echoVolRed;  // FM: クランプなし
                             } else {
-                                volDown.value = std::max(st.volume - st.echoVolRed, 0);
+                                volDown.value = std::max(st.volume - m_echoVolRed, 0);
                             }
                             volDown.channel = ch;
                             volDown.note = 3;  // エコー音量マーカー（ブラケットループvolDelta補正対象、vコマンド検出除外）
