@@ -1402,6 +1402,10 @@ private:
             m_engine->writeReg(port, 0xB4 + off, (uint8_t)panToReg(pan));
         }
         // SSG: パンなし（モノラル）
+        else if (isADPCMB(ch)) {
+            // ADPCM-B: Z80 STEREOルーチン互換 — PCMLRにパン値を設定
+            m_pcmPan = (uint8_t)panToReg(pan);
+        }
         else if (isRhythm(ch)) {
             // リズムPAN: MUCOM88形式 p $NN
             // bit4-5: L/R (0=off, 1=R, 2=L, 3=LR)
