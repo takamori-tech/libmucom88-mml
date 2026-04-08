@@ -141,12 +141,6 @@ public:
         // 曲全体ループ周期の計算（OpenMUCOM88 maxcount 互換）
         // Wiki: Lコマンド = "曲全体のループ位置指定"
         // イベント列を直接走査してLOOP_POINTを検出（processEvents実行前に必要）
-        // Z80コンパイラは全チャンネルを同一曲長（maxcount）にパディングする。
-        // 我々のパーサーではチャンネル間でendTickが異なるため:
-        //   commonEndTick  = max(endTick) — 最長チャンネルが曲全体長を決定（≈ maxcount）
-        //   commonLoopTick = min(loopTick) — 最も早いLポイントからループ区間開始
-        // min(endTick)を使うと短いチャンネルで曲が打ち切られ、loopTick > endTick で
-        // uint32_t underflow → 毎tick globalLoopRestart() が発火する（Issue #32）
         {
             m_commonEndTick = 0;
             m_commonLoopTick = UINT32_MAX;
@@ -164,9 +158,8 @@ public:
                         break;
                     }
                 }
-                // 全非空チャンネルのendTickをmax計算に含める（Z80パディング互換）
                 uint32_t endTick = st.events.back().tick;
-                st.perChEndTick = endTick;  // per-channelループ用
+                st.perChEndTick = endTick;
                 st.perChLoopOffset = 0;
                 if (endTick > maxEnd) maxEnd = endTick;
                 if (!st.hasLoopPoint) continue;
@@ -182,9 +175,6 @@ public:
             // （パート分離比較時にOpenMUCOM88のMaxCountと合わせるため）
             if (m_overrideEndTick > 0)
                 m_commonEndTick = m_overrideEndTick;
-
-            // Z80コンパイラ互換: commonEndTickを超えるイベントは再生時にスキップ
-            // イベント列自体は破壊しない（play()の再呼び出しに対応、libmucom88-mml#2）
         }
         // Timer-B 初期化
         recalcTimerB();
@@ -351,8 +341,8 @@ public:
                 if (m_loop && m_commonEndTick > 0) {
                     if (m_perChannelLoop) {
                         // per-channel独立ループ（Issue #62）
-                        // Z80互換: 各チャンネルが独立にend markerでDATA TOPへジャンプ。
-                        // 初回globalLoopRestart後、各チャンネルは (commonEndTick - loopTick) 周期で独立ループ。
+                        // 初回globalLoopRestart後、各チャンネルは独立周期でループ。
+                        // perChTickBase は perChannelRestart() 内で更新される
                         for (int ch2 = 0; ch2 < MAX_MML_CHANNELS; ch2++) {
                             auto& st2 = m_channels[ch2];
                             if (st2.events.empty() || !st2.hasLoopPoint) continue;
@@ -364,7 +354,7 @@ public:
                             }
                         }
                     } else {
-                        // 初回ループ: 全チャンネル同時リスタート（MaxCountパディング互換）
+                        // 初回ループ: 全チャンネル同時リスタート（MaxCount互換）
                         uint32_t chTick = m_globalTick - m_loopTickOffset;
                         if (chTick >= m_commonEndTick) {
                             globalLoopRestart();
@@ -391,7 +381,33 @@ public:
                 for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
                     auto& st = m_channels[ch];
                     if (st.events.empty()) continue;
-                    if (st.eventIdx >= st.events.size()) continue;
+                    if (st.eventIdx >= st.events.size()) {
+                        // Issue #68: Z80互換 — イベント消費済みチャンネルの即時リスタート
+                        // Z80ドライバーは各チャンネルが独立にend marker到達→DATA TOPへジャンプ。
+                        // MaxCountパディングは存在しない。globalLoopRestartを待たずに即時リスタート。
+                        if (m_loop && st.hasLoopPoint && !m_perChannelLoop) {
+                            // per-channelモードに移行（初回リスタート時）
+                            // 全チャンネルのperChLoopLen/nextRestartTickを初期化
+                            m_perChannelLoop = true;
+                            for (int c = 0; c < MAX_MML_CHANNELS; c++) {
+                                auto& sc = m_channels[c];
+                                if (sc.events.empty() || !sc.hasLoopPoint) continue;
+                                sc.perChLoopLen = sc.perChEndTick - sc.loopTick;
+                                if (sc.perChLoopLen == 0) sc.perChLoopLen = 1;
+                                // まだリスタートしていないチャンネルはperChTickBase=0(初回パス)
+                                // nextRestartTickは自チャンネルのendTick
+                                if (sc.eventIdx < sc.events.size()) {
+                                    sc.perChTickBase = 0;
+                                    sc.nextRestartTick = sc.perChEndTick;
+                                }
+                            }
+                            perChannelRestart(ch);
+                            // リスタート後のnextRestartTickを設定
+                            st.nextRestartTick = m_globalTick + st.perChLoopLen;
+                            processEvents(ch, m_globalTick);
+                        }
+                        continue;
+                    }
                     processEvents(ch, m_globalTick);
                     if (st.noteOn && st.lfoEnabled && st.lfoDepth != 0)
                         tickLfo(ch);
@@ -470,7 +486,7 @@ public:
 
         // 全チャンネル終端 → 停止
         // - m_loop=false: 常に停止
-        // - m_loop=true + commonEndTick>0: globalLoopRestartが処理するため停止しない
+        // - m_loop=true + commonEndTick>0: ループリスタートが処理するため停止しない
         // - m_loop=true + commonEndTick==0: L無し曲 → ループ不可、残留音防止のため停止
         if (!m_loop || m_commonEndTick == 0) {
             bool allDone = true;
@@ -486,8 +502,8 @@ public:
     }
 
     // ── 曲全体ループ: 全チャンネルをLポイントに同時巻き戻す ──
-    // Wiki: L = "曲全体のループ位置指定 (各パート1箇所のみ指定可能)"
-    // OpenMUCOM88互換: 全チャンネルが commonEndTick に達したら同時にループ。
+    // 注: Issue #68以降、advance()からは呼ばれない（per-channelループに移行）
+    // 外部からの明示的呼び出し用に残す
     void globalLoopRestart()
     {
         // グローバルtickオフセット更新
@@ -671,8 +687,7 @@ public:
         }
         m_engine->writeReg(0, 0x07, m_ssgMixer);
 
-        // per-channel独立ループの初期化（Issue #62）
-        // Z80では各チャンネルが独立にend markerでDATA TOPへジャンプする。
+        // per-channel独立ループの初期化（Issue #62/#68）
         // 初回のglobalLoopRestartで全チャンネル一斉に巻き戻した後、
         // 2回目以降は各チャンネルが独立した周期（commonEndTick - loopTick）でループする。
         m_perChannelLoop = true;
