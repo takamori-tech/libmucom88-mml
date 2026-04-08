@@ -394,17 +394,30 @@ public:
                                 if (sc.events.empty() || !sc.hasLoopPoint) continue;
                                 sc.perChLoopLen = sc.perChEndTick - sc.loopTick;
                                 if (sc.perChLoopLen == 0) sc.perChLoopLen = 1;
-                                // まだリスタートしていないチャンネルはperChTickBase=0(初回パス)
+                                // perChTickBase=0（初回パス: chTick = globalTick）
+                                sc.perChTickBase = 0;
                                 // nextRestartTickは自チャンネルのendTick
-                                if (sc.eventIdx < sc.events.size()) {
-                                    sc.perChTickBase = 0;
-                                    sc.nextRestartTick = sc.perChEndTick;
+                                // （イベント消費済みチャンネルも含む — Issue #71）
+                                sc.nextRestartTick = sc.perChEndTick;
+                            }
+                            // イベント消費済みの全チャンネルを即座にリスタート（Issue #71）
+                            // Z80では各チャンネルが独立にend marker到達→DATA TOPジャンプ。
+                            // 移行発動チャンネル(ch)だけでなく、同じtickで消費済みの他チャンネルも
+                            // 即座にリスタートする。perChTickBaseはperChEndTick基準で計算し、
+                            // イベント消費の検出が1tick遅れる問題を補正する。
+                            for (int c = 0; c < MAX_MML_CHANNELS; c++) {
+                                auto& sc = m_channels[c];
+                                if (sc.events.empty() || !sc.hasLoopPoint) continue;
+                                if (sc.eventIdx >= sc.events.size()) {
+                                    perChannelRestart(c);
+                                    // perChTickBase補正: perChannelRestart()は m_globalTick - loopTick を
+                                    // 設定するが、イベント消費の検出が1tick遅れるため、実際のend tickを
+                                    // 基準にした値に上書きする（Issue #71）
+                                    sc.perChTickBase = sc.perChEndTick - sc.loopTick;
+                                    sc.nextRestartTick = sc.perChEndTick + sc.perChLoopLen;
+                                    processEvents(c, m_globalTick);
                                 }
                             }
-                            perChannelRestart(ch);
-                            // リスタート後のnextRestartTickを設定
-                            st.nextRestartTick = m_globalTick + st.perChLoopLen;
-                            processEvents(ch, m_globalTick);
                         }
                         continue;
                     }
