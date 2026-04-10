@@ -18,6 +18,14 @@
 // MUCOM88のパラメーター順: AR,DR,SR,RR,SL,TL,KS,ML,DT
 // ymfmへの書き込み順:      DT,ML,TL,KS,AR,DR,SR,SL,RR
 // =============================================================================
+// 音色の出典情報
+enum class PatchSource : uint8_t {
+    Unknown  = 0,   // 出典不明（初期値）
+    VoiceDat = 1,   // voice.dat / voiceopm.dat（ROM1）
+    Inline   = 2,   // MUCインライン定義 @N={...}（ROM2）
+    Edited   = 3,   // Voice Editorで編集済み（RAM）
+};
+
 struct FmPatch {
     int  patchNo   = 0;   // @番号
     int  fb        = 0;   // Feedback (0-7)
@@ -34,6 +42,8 @@ struct FmPatch {
         int ml  = 1;   // Multiple     (0-15)
         int dt  = 0;   // Detune       (0-7, OPN系DT)
         int dt2 = 0;   // Detune2      (0-3, OPM固有 — 非整数倍音的金属的響き)
+        int ame = 0;   // AM Enable    (0-1, LFOによる振幅変調を受けるか)
+        int ssgEg = 0; // SSG-EG       (0-15, 0=OFF, 8-15=各パターン, OPN/OPNA固有)
     } op[4];
 
     // OPM拡張パラメータ（voice.dat バイト25-27、後方互換）
@@ -43,6 +53,7 @@ struct FmPatch {
 
     std::string name;           // 音色名（voice.dat: 6文字、MUCインライン: ,"name"）
 
+    PatchSource source = PatchSource::Unknown;  // 出典情報（RAM/ROM1/ROM2判別用）
     bool valid = false;
 };
 
@@ -133,7 +144,8 @@ inline FmPatch parseVoiceDatEntry(const uint8_t* voiceDat, size_t dataSize, int 
         uint8_t ks_ar = rec[9 + s];    // byte 9-12
         op.ks = (ks_ar >> 6) & 3;
         op.ar = ks_ar & 0x1F;
-        op.dr = rec[13 + s] & 0x9F;    // byte 13-16 (bit7=AM enable, bit4-0=DR)
+        op.ame = (rec[13 + s] >> 7) & 1; // byte 13-16 bit7: AM Enable
+        op.dr = rec[13 + s] & 0x1F;    // byte 13-16 bit4-0: DR
         op.sr = rec[17 + s] & 0x1F;    // byte 17-20
         uint8_t sl_rr = rec[21 + s];   // byte 21-24
         op.sl = (sl_rr >> 4) & 0x0F;
@@ -156,6 +168,7 @@ inline FmPatch parseVoiceDatEntry(const uint8_t* voiceDat, size_t dataSize, int 
     while (!p.name.empty() && (p.name.back() == ' ' || p.name.back() == '\0'))
         p.name.pop_back();
 
+    p.source = PatchSource::VoiceDat;
     p.valid = true;
     return p;
 }

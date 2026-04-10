@@ -553,6 +553,7 @@ private:
                         patch.name = name;
                     }
                 }
+                patch.source = PatchSource::Inline;
                 patch.valid = true;
                 m_patches[patchNo] = patch;
             }

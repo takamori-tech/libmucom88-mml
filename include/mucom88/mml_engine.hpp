@@ -1513,7 +1513,7 @@ private:
             m_engine->writeReg(port, 0x40 + base, (uint8_t)(op.tl & 0x7F));
             m_engine->writeReg(port, 0x50 + base,
                 (uint8_t)(((op.ks & 0x03) << 6) | (op.ar & 0x1F)));
-            m_engine->writeReg(port, 0x60 + base, (uint8_t)(op.dr & 0x9F)); // bit7=AM, bit4-0=DR
+            m_engine->writeReg(port, 0x60 + base, (uint8_t)(((op.ame & 1) << 7) | (op.dr & 0x1F)));
             m_engine->writeReg(port, 0x70 + base, (uint8_t)(op.sr & 0x1F));
             m_engine->writeReg(port, 0x80 + base,
                 (uint8_t)(((op.sl & 0x0F) << 4) | (op.rr & 0x0F)));
