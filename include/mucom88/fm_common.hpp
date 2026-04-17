@@ -24,6 +24,7 @@ enum class PatchSource : uint8_t {
     VoiceDat = 1,   // voice.dat / voiceopm.dat（ROM1）
     Inline   = 2,   // MUCインライン定義 @N={...}（ROM2）
     Edited   = 3,   // Voice Editorで編集済み（RAM）
+    UserBank = 4,   // ユーザー保存バンク（mucom88v #173, #177）
 };
 
 struct FmPatch {
