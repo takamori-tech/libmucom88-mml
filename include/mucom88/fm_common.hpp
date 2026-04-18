@@ -21,10 +21,11 @@
 // 音色の出典情報
 enum class PatchSource : uint8_t {
     Unknown  = 0,   // 出典不明（初期値）
-    VoiceDat = 1,   // voice.dat / voiceopm.dat（ROM1）
-    Inline   = 2,   // MUCインライン定義 @N={...}（ROM2）
+    VoiceDat = 1,   // voice.dat / voiceopm.dat（INT, ROM1 デフォルト）
+    Inline   = 2,   // MUCインライン定義 @N={...}（MML, ROM2）
     Edited   = 3,   // Voice Editorで編集済み（RAM）
     UserBank = 4,   // ユーザー保存バンク（mucom88v #173, #177）
+    External = 5,   // MUC companion voice.dat（EXT, mucom88v #180）
 };
 
 struct FmPatch {
