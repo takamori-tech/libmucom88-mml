@@ -253,6 +253,13 @@ public:
     bool isPlaying() const { return m_playing; }
     uint32_t globalTick() const { return m_globalTick; }
     int globalTempo() const { return m_globalTempo; }
+    uint32_t commonEndTick() const { return m_commonEndTick; }
+    uint32_t loopTickOffset() const { return m_loopTickOffset; }
+    int loopCount() const {
+        if (m_commonEndTick == 0 || m_commonEndTick <= m_commonLoopTick) return 0;
+        uint32_t loopLen = m_commonEndTick - m_commonLoopTick;
+        return (int)(m_loopTickOffset / loopLen);
+    }
 
     // チャンネル状態取得（UI表示用）
     bool chNoteOn(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].noteOn : false; }
