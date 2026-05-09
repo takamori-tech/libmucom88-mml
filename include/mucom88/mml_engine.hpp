@@ -217,6 +217,7 @@ public:
         for (int ch = 0; ch < MAX_MML_CHANNELS; ch++) {
             auto& st = m_channels[ch];
             if (st.events.empty()) continue;
+            if (isADPCMB(ch) && m_voiceOverride) continue;
             processEvents(ch, m_globalTick);  // m_globalTick = 0
         }
 
@@ -227,6 +228,7 @@ public:
     void stop()
     {
         m_playing = false;
+        m_voiceOverride = false;
         if (m_engine) allSoundOff();
     }
 
@@ -272,6 +274,44 @@ public:
     uint32_t chNoteOnCount(int ch) const { return (ch >= 0 && ch < MAX_MML_CHANNELS) ? m_channels[ch].noteOnCount : 0; }
     // FM パッチ番号取得（fi=FMインデックス 0-5）
     int  fmPatchNo(int fi) const { return (fi >= 0 && fi < MAX_FM_CHANNELS) ? m_fmPatchNo[fi] : -1; }
+
+    // ── ADPCM-B ボイス再生（IFmEngine パススルー + Kトラック優先制御）──
+    // ゲームボイス再生中はBGMのKトラック(ch10)イベント処理を抑制し、
+    // ADPCM-Bをボイス再生に専有させる。
+    bool hasVoiceTable() const {
+        return m_engine ? m_engine->hasVoiceTable() : false;
+    }
+    bool loadVoiceTable(const std::string& path) {
+        return m_engine ? m_engine->loadVoiceTable(path) : false;
+    }
+    bool loadVoiceTableFromMemory(const uint8_t* data, size_t size) {
+        return m_engine ? m_engine->loadVoiceTableFromMemory(data, size) : false;
+    }
+    void playVoice(int voiceId) {
+        if (!m_engine) return;
+        m_voiceOverride = true;
+        m_engine->playVoice(voiceId);
+    }
+    void stopVoice() {
+        if (!m_engine) return;
+        m_engine->stopVoice();
+        m_voiceOverride = false;
+    }
+    bool isVoicePlaying() const {
+        return m_engine ? m_engine->isVoicePlaying() : false;
+    }
+    void tickVoiceTimer(uint32_t frameCount) {
+        if (!m_engine) return;
+        m_engine->tickVoiceTimer(frameCount);
+        if (m_voiceOverride && !m_engine->isVoicePlaying()) {
+            m_voiceOverride = false;
+        }
+    }
+    void stopAdpcmB() {
+        if (!m_engine) return;
+        m_engine->stopAdpcmB();
+        m_voiceOverride = false;
+    }
 
     // ── グローバル減衰（ダッキング用）────────────────────
     // att: FM TL加算値（0=通常、20≈-15dB）。SSGはatt/4で換算。
@@ -429,11 +469,14 @@ public:
                         }
                         continue;
                     }
-                    processEvents(ch, m_globalTick);
-                    if (st.noteOn && st.lfoEnabled && st.lfoDepth != 0)
-                        tickLfo(ch);
-                    if (st.portaActive)
-                        tickPortamento(ch);
+                    // ボイス再生中はKトラック(ch10)のイベント処理を抑制
+                    if (!(isADPCMB(ch) && m_voiceOverride)) {
+                        processEvents(ch, m_globalTick);
+                        if (st.noteOn && st.lfoEnabled && st.lfoDepth != 0)
+                            tickLfo(ch);
+                        if (st.portaActive)
+                            tickPortamento(ch);
+                    }
                 }
 
                 // MUCOM88互換: SSGソフトウェアエンベロープ
@@ -978,6 +1021,7 @@ private:
     // yコマンドやpコマンドで更新される。rhythmKeyOnで毎回書き込む。
     std::array<uint8_t, 6> m_rhythmIL = {0xDF,0xDF,0xDF,0xDF,0xDF,0xDF}; // L+R + level 31
     int         m_globalAtt  = 0;     // グローバル減衰（FM TL加算値、0=通常）
+    bool        m_voiceOverride = false; // ゲームボイス再生中: Kトラック(ch10)イベント抑制
     int         m_pcmVolMode = 0;     // PVMODE: 0=IX+6のみ使用, 1=IX+6+IX+7
     int         m_pcmAddVol  = 0;     // ADPCM-B追加音量（PVMODE=1時のIX+7、V1→v設定）
 

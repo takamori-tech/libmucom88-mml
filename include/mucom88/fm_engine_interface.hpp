@@ -38,6 +38,11 @@ public:
     // ADPCM-B ボイステーブル
     virtual bool loadVoiceTable(const std::string& path) = 0;
     virtual bool loadVoiceTableFromMemory(const uint8_t* data, size_t dataSize) = 0;
+    virtual bool hasVoiceTable() const = 0;
     virtual void playVoice(int voiceId) = 0;
     virtual void stopVoice() = 0;
+    virtual bool isVoicePlaying() const = 0;
+    virtual void tickVoiceTimer(uint32_t frameCount) = 0;
+    // BGM + ボイス両方のADPCM-Bを強制停止
+    virtual void stopAdpcmB() = 0;
 };
